@@ -24,7 +24,7 @@ detect_distribution() {
 install_dependencies() {
     detect_distribution
     $pm update -y
-    local packages=("nginx" "git" "jq" "certbot" "python3-certbot-nginx" "python3" "python3-pip")
+    local packages=("nginx" "git" "jq" "python3" "python3-pip")
     
     for package in "${packages[@]}"; do
         if ! dpkg -s "$package" &> /dev/null 2>&1 && ! rpm -q "$package" &> /dev/null 2>&1; then
@@ -41,6 +41,12 @@ install_dependencies() {
     else
         echo "python3 is already installed."
     fi
+    
+    # Fix certbot pyOpenSSL issue
+    echo "Fixing certbot dependencies..."
+    pip3 install --upgrade pip
+    pip3 install --upgrade pyOpenSSL cryptography
+    $pm install -y certbot python3-certbot-nginx
 }
 
 #install
@@ -68,14 +74,24 @@ install() {
         sed -i "s/<YOUR_HOST>/$domain/g" /root/smartSNI/nginx.conf
 
         # Obtain SSL certificates
+        echo "Obtaining SSL certificate for $domain..."
         certbot --nginx -d $domain --register-unsafely-without-email --non-interactive --agree-tos --redirect
+        
+        if [ $? -ne 0 ]; then
+            echo "Warning: SSL certificate failed. Continuing without SSL..."
+            echo "You can manually run: certbot --nginx -d $domain"
+        fi
 
         # Copy config
         sudo cp /root/smartSNI/nginx.conf "$nginx_conf"
 
-        # Stop and restart nginx
-        systemctl stop nginx
+        # Restart nginx
         systemctl restart nginx
+        
+        if [ $? -ne 0 ]; then
+            echo "Nginx failed to start. Checking configuration..."
+            nginx -t
+        fi
 
         # Install Python dependencies
         cd /root/smartSNI
