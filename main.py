@@ -55,43 +55,27 @@ class Config:
             return "127.0.0.1"
 
     @staticmethod
-    def _get_server_hostname() -> str:
+    def load_config(config_file: str = "config.json") -> 'Config':
         try:
-            import subprocess
-            result = subprocess.run(['hostname', '-f'], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                hostname = result.stdout.strip()
-                if '.' in hostname and not hostname.endswith('.localdomain'):
-                    return hostname
-        except:
-            pass
-        
-        try:
-            hostname = socket.getfqdn()
-            if '.' in hostname and not hostname.endswith('.localdomain') and hostname != 'localhost':
-                return hostname
-        except:
-            pass
-        
-        return "localhost"
-
-    @staticmethod
-    def load_config(domains_file: str = "domains.txt") -> 'Config':
-        try:
-            with open(domains_file, 'r') as file:
-                domain_lines = [line.strip() for line in file.readlines() if line.strip() and not line.strip().startswith('#')]
+            with open(config_file, 'r') as file:
+                config_data = json.load(file)
         except FileNotFoundError:
-            logger.warning(f"Domains file '{domains_file}' not found, using empty domain list")
-            domain_lines = []
+            logger.fatal(f"Config file '{config_file}' not found")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            logger.fatal(f"Invalid JSON in config file: {e}")
+            sys.exit(1)
+        
+        host = config_data.get('host', 'localhost')
+        domain_list = config_data.get('domains', [])
         
         server_ip = Config._get_server_ip()
-        host = Config._get_server_hostname()
         
         logger.info(f"Detected server IP: {server_ip}")
-        logger.info(f"Detected server hostname: {host}")
+        logger.info(f"Configured hostname: {host}")
         
         domains = {}
-        for domain in domain_lines:
+        for domain in domain_list:
             domains[domain] = server_ip
         
         return Config(
@@ -500,7 +484,7 @@ class SNIProxy:
 
 async def main():
     try:
-        config = Config.load_config("domains.txt")
+        config = Config.load_config("config.json")
     except Exception as e:
         logger.fatal(f"Failed to load configuration: {e}")
         sys.exit(1)

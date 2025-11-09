@@ -5,21 +5,26 @@ Python-based DNS proxy with DoH/DoT support, SNI-based HTTPS proxying, and white
 ## Features
 
 - **DNS-over-HTTPS (DoH)** and **DNS-over-TLS (DoT)** support
-- **Whitelist-only mode**: Only domains in `domains.txt` are proxied, others return REFUSED
+- **Whitelist-only mode**: Only domains in `config.json` are proxied, others return REFUSED
 - **SNI Proxy**: Transparently proxies HTTPS traffic for whitelisted domains
 - **Rate limiting** with token bucket algorithm
 
 ## Configuration
 
-Edit `domains.txt` and add one domain keyword per line:
+Edit `config.json`:
 
-```
-youtube
-google
-facebook
+```json
+{
+  "host": "your-domain.com",
+  "domains": [
+    "youtube",
+    "google",
+    "facebook"
+  ]
+}
 ```
 
-Only these domains will be resolved through your proxy. All other DNS queries return REFUSED, forcing clients to use their default DNS.
+Only domains in the list will be resolved through your proxy. All other DNS queries return REFUSED, forcing clients to use their default DNS.
 
 ## Installation
 
