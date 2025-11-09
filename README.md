@@ -16,15 +16,17 @@ Edit `config.json`:
 ```json
 {
   "host": "your-domain.com",
-  "domains": [
-    "youtube",
-    "google",
-    "facebook"
-  ]
+  "domains": {
+    "youtube": "1.2.3.4",
+    "google": "1.2.3.4",
+    "facebook": "1.2.3.4"
+  }
 }
 ```
 
-Only domains in the list will be resolved through your proxy. All other DNS queries return REFUSED, forcing clients to use their default DNS.
+Replace `1.2.3.4` with your server's public IP address.
+
+Only domains in the list will be resolved through your proxy (returning your server's IP). All other DNS queries are resolved via Cloudflare DoH (1.1.1.1).
 
 ## Installation
 

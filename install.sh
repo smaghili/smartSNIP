@@ -62,20 +62,20 @@ install() {
         read -p "Enter your domain: " domain
         read -p "Enter the domain names separated by commas (example: google,youtube): " site_list
         
-        # Create config.json
         IFS=',' read -ra sites <<< "$site_list"
-        echo "{" > /root/smartSNI/config.json
-        echo "  \"host\": \"$domain\"," >> /root/smartSNI/config.json
-        echo "  \"domains\": [" >> /root/smartSNI/config.json
-        for i in "${!sites[@]}"; do
-            if [ $i -eq $((${#sites[@]}-1)) ]; then
-                echo "    \"${sites[$i]}\"" >> /root/smartSNI/config.json
-            else
-                echo "    \"${sites[$i]}\"," >> /root/smartSNI/config.json
+        
+        new_domains="{"
+        for ((i = 0; i < ${#sites[@]}; i++)); do
+            new_domains+="\"${sites[i]}\": \"$myip\""
+            if [ $i -lt $((${#sites[@]}-1)) ]; then
+                new_domains+=", "
             fi
         done
-        echo "  ]" >> /root/smartSNI/config.json
-        echo "}" >> /root/smartSNI/config.json
+        new_domains+="}"
+        
+        json_content="{ \"host\": \"$domain\", \"domains\": $new_domains }"
+        
+        echo "$json_content" | jq '.' > /root/smartSNI/config.json
 
         nginx_conf="/etc/nginx/sites-enabled/default"
         sed -i "s/server_name _;/server_name $domain;/g" "$nginx_conf"

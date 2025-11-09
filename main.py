@@ -67,20 +67,20 @@ class Config:
             sys.exit(1)
         
         host = config_data.get('host', 'localhost')
-        domain_list = config_data.get('domains', [])
+        domains_map = config_data.get('domains', {})
+        
+        if not isinstance(domains_map, dict):
+            logger.fatal("'domains' must be a JSON object/map")
+            sys.exit(1)
         
         server_ip = Config._get_server_ip()
         
         logger.info(f"Detected server IP: {server_ip}")
         logger.info(f"Configured hostname: {host}")
         
-        domains = {}
-        for domain in domain_list:
-            domains[domain] = server_ip
-        
         return Config(
             host=host,
-            domains=domains,
+            domains=domains_map,
             server_ip=server_ip
         )
 
@@ -160,19 +160,31 @@ class DNSHandler:
             except ValueError:
                 raise ValueError("Invalid IP address")
 
-            response_message = dns_message.make_response()
-            answer_rr = A(
-                rdataclass.IN,
-                rdatatype.A,
-                str(ip_address)
-            )
-            rrset = dns.rrset.from_rdata(question.name, 3600, answer_rr)
-            response_message.answer.append(rrset[0])
+            response_message = message.make_response(dns_message)
+            rrset = dns.rrset.RRset(question.name, rdataclass.IN, rdatatype.A)
+            rrset.ttl = 3600
+            rrset.add(A(rdataclass.IN, rdatatype.A, str(ip_address)))
+            response_message.answer.append(rrset)
             return response_message.to_wire()
 
-        response_message = dns_message.make_response()
-        response_message.set_rcode(dns.rcode.REFUSED)
-        return response_message.to_wire()
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                    "https://1.1.1.1/dns-query",
+                    data=query_bytes,
+                    headers={"Content-Type": "application/dns-message"},
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        response_data = await resp.read()
+                        return response_data
+                    else:
+                        raise ValueError(f"Cloudflare DoH returned status {resp.status}")
+            except Exception as e:
+                logger.warning(f"Cloudflare DoH failed: {e}")
+                response_message = message.make_response(dns_message)
+                response_message.set_rcode(dns.rcode.SERVFAIL)
+                return response_message.to_wire()
 
 
 class DOHServer:
@@ -220,6 +232,9 @@ class DOHServer:
         try:
             dns_response = await self.dns_handler.process_dns_query(query_bytes)
         except Exception as e:
+            logger.error(f"DNS query error: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return web.Response(
                 text=f"Failed to process DNS query: {str(e)}",
                 status=500
@@ -408,7 +423,7 @@ class SNIProxy:
             
             if target_host == self.config.host:
                 target_address = "127.0.0.1"
-                target_port = 443
+                target_port = 8443
             else:
                 target_address = target_host
                 target_port = 443
@@ -503,7 +518,7 @@ async def main():
         await asyncio.gather(
             doh_server.run(host="127.0.0.1", port=8080),
             dot_server.run(port=853),
-            sni_proxy.run(port=8443)
+            sni_proxy.run(port=443)
         )
     except Exception as e:
         logger.fatal(f"Server failed to start: {e}")
