@@ -408,7 +408,7 @@ class SNIProxy:
             
             if target_host == self.config.host:
                 target_address = "127.0.0.1"
-                target_port = 8443
+                target_port = 443
             else:
                 target_address = target_host
                 target_port = 443
@@ -503,7 +503,7 @@ async def main():
         await asyncio.gather(
             doh_server.run(host="127.0.0.1", port=8080),
             dot_server.run(port=853),
-            sni_proxy.run(port=443)
+            sni_proxy.run(port=8443)
         )
     except Exception as e:
         logger.fatal(f"Server failed to start: {e}")
