@@ -186,38 +186,9 @@ class DNSHandler:
             response_message.answer.append(rrset[0])
             return response_message.to_wire()
 
-        dns_servers = [
-            ("8.8.8.8", 53),
-            ("1.1.1.1", 53),
-            ("4.2.2.4", 53),
-        ]
-        
-        for dns_ip, dns_port in dns_servers:
-            try:
-                loop = asyncio.get_event_loop()
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.settimeout(2)
-                
-                await loop.run_in_executor(None, sock.sendto, query_bytes, (dns_ip, dns_port))
-                response_data, _ = await loop.run_in_executor(None, sock.recvfrom, 4096)
-                sock.close()
-                
-                logger.debug(f"DNS resolved via UDP {dns_ip}")
-                return response_data
-                
-            except socket.timeout:
-                logger.warning(f"DNS UDP query to {dns_ip} timed out")
-                if 'sock' in locals():
-                    sock.close()
-                continue
-            except Exception as e:
-                logger.warning(f"DNS UDP query to {dns_ip} failed: {e}")
-                if 'sock' in locals():
-                    sock.close()
-                continue
-        
-        logger.error("All DNS servers failed")
-        raise ValueError("All DNS servers failed")
+        response_message = dns_message.make_response()
+        response_message.set_rcode(dns.rcode.REFUSED)
+        return response_message.to_wire()
 
 
 class DOHServer:
