@@ -515,12 +515,15 @@ async def main():
 
     logger.info("Starting Smart SNI proxy server on :443, :853...")
 
-    await asyncio.gather(
-        doh_server.run(host="127.0.0.1", port=8080),
-        dot_server.run(port=853),
-        sni_proxy.run(port=443),
-        return_exceptions=True
-    )
+    try:
+        await asyncio.gather(
+            doh_server.run(host="127.0.0.1", port=8080),
+            dot_server.run(port=853),
+            sni_proxy.run(port=443)
+        )
+    except Exception as e:
+        logger.fatal(f"Server failed to start: {e}")
+        raise
 
 
 if __name__ == "__main__":
