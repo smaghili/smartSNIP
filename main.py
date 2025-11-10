@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import base64
+import gc
 import ipaddress
 import json
 import logging
@@ -19,6 +20,8 @@ from dns import message, rdatatype, rdataclass
 from dns.rdtypes.IN.A import A
 
 
+gc.set_threshold(700, 10, 5)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -27,77 +30,18 @@ logger = logging.getLogger(__name__)
 
 
 class Config:
-    def __init__(self, host: str, domains: Dict[str, str], server_ip: str):
+    def __init__(self, host: str, domains: Dict[str, str]):
         self.host = host
         self.domains = domains
-        self.server_ip = server_ip
 
     @staticmethod
-    def _get_server_ip() -> str:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-            
-            if not local_ip.startswith("127.") and not local_ip.startswith("10.") and not local_ip.startswith("192.168.") and not local_ip.startswith("172.16."):
-                return local_ip
-            
-            try:
-                import urllib.request
-                import urllib.error
-                public_ip = urllib.request.urlopen("https://api.ipify.org", timeout=5).read().decode('utf-8').strip()
-                return public_ip
-            except:
-                return local_ip
-        except Exception as e:
-            logger.warning(f"Failed to detect server IP automatically: {e}")
-            return "127.0.0.1"
-
-    @staticmethod
-    def _get_server_hostname() -> str:
-        try:
-            import subprocess
-            result = subprocess.run(['hostname', '-f'], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                hostname = result.stdout.strip()
-                if '.' in hostname and not hostname.endswith('.localdomain'):
-                    return hostname
-        except:
-            pass
-        
-        try:
-            hostname = socket.getfqdn()
-            if '.' in hostname and not hostname.endswith('.localdomain') and hostname != 'localhost':
-                return hostname
-        except:
-            pass
-        
-        return "localhost"
-
-    @staticmethod
-    def load_config(domains_file: str = "domains.txt") -> 'Config':
-        try:
-            with open(domains_file, 'r') as file:
-                domain_lines = [line.strip() for line in file.readlines() if line.strip() and not line.strip().startswith('#')]
-        except FileNotFoundError:
-            logger.warning(f"Domains file '{domains_file}' not found, using empty domain list")
-            domain_lines = []
-        
-        server_ip = Config._get_server_ip()
-        host = Config._get_server_hostname()
-        
-        logger.info(f"Detected server IP: {server_ip}")
-        logger.info(f"Detected server hostname: {host}")
-        
-        domains = {}
-        for domain in domain_lines:
-            domains[domain] = server_ip
+    def load_config(filename: str = "config.json") -> 'Config':
+        with open(filename, 'r') as file:
+            config_data = json.load(file)
         
         return Config(
-            host=host,
-            domains=domains,
-            server_ip=server_ip
+            host=config_data['host'],
+            domains=config_data['domains']
         )
 
 
@@ -229,9 +173,9 @@ class DOHServer:
                     status=400
                 )
             try:
-                missing_padding = len(dns_param) % 4
-                if missing_padding:
-                    dns_param += '=' * (4 - missing_padding)
+                padding = 4 - (len(dns_param) % 4)
+                if padding != 4:
+                    dns_param += '=' * padding
                 query_bytes = base64.urlsafe_b64decode(dns_param)
             except Exception:
                 return web.Response(
@@ -255,7 +199,7 @@ class DOHServer:
             dns_response = await self.dns_handler.process_dns_query(query_bytes)
         except Exception as e:
             return web.Response(
-                text=f"Failed to process DNS query: {str(e)}",
+                text="Failed to process DNS query",
                 status=500
             )
 
@@ -265,9 +209,18 @@ class DOHServer:
             status=200
         )
 
+    async def handle_path(self, request: web.Request) -> web.Response:
+        if request.path == "/dns-query":
+            return await self.handle_doh_request(request)
+        else:
+            return web.Response(
+                text="Unsupported path",
+                status=404
+            )
+
     async def create_app(self) -> web.Application:
         app = web.Application()
-        app.router.add_route("*", "/dns-query", self.handle_doh_request)
+        app.router.add_route("*", "/{path:.*}", self.handle_path)
         return app
 
     async def run(self, host: str = "127.0.0.1", port: int = 8080):
@@ -471,6 +424,11 @@ class SNIProxy:
                     except Exception:
                         pass
                     finally:
+                        try:
+                            backend_writer.write_eof()
+                            await backend_writer.drain()
+                        except:
+                            pass
                         backend_writer.close()
                     await backend_writer.wait_closed()
                 
@@ -485,6 +443,11 @@ class SNIProxy:
                     except Exception:
                         pass
                     finally:
+                        try:
+                            writer.write_eof()
+                            await writer.drain()
+                        except:
+                            pass
                         writer.close()
                     await writer.wait_closed()
                 
@@ -518,7 +481,7 @@ class SNIProxy:
 
 async def main():
     try:
-        config = Config.load_config("domains.txt")
+        config = Config.load_config("config.json")
     except Exception as e:
         logger.fatal(f"Failed to load configuration: {e}")
         sys.exit(1)
@@ -531,7 +494,7 @@ async def main():
     dot_server = DOTServer(dns_handler, rate_limiter, config)
     sni_proxy = SNIProxy(config)
 
-    logger.info("Starting Smart SNI proxy server on :443, :853...")
+    logger.info("Starting SSNI proxy server on :443, :853...")
 
     await asyncio.gather(
         doh_server.run(host="127.0.0.1", port=8080),

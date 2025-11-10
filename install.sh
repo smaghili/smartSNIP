@@ -50,18 +50,32 @@ install() {
     else
         install_dependencies
         myip=$(hostname -I | awk '{print $1}')
-        git clone https://github.com/smaghili/smartSNIP.git /root/smartSNI
+        git clone https://github.com/bepass-org/smartSNI.git /root/smartSNI
 
         clear
         read -p "Enter your domain: " domain
         read -p "Enter the domain names separated by commas (example: google,youtube): " site_list
         
-        # Save to domains.txt (just domain list, hostname is auto-detected)
-        > /root/smartSNI/domains.txt
+        # Save to config.json
+        myip=$(hostname -I | awk '{print $1}')
+        echo "{" > /root/smartSNI/config.json
+        echo "  \"host\": \"$domain\"," >> /root/smartSNI/config.json
+        echo "  \"domains\": {" >> /root/smartSNI/config.json
+        
         IFS=',' read -ra sites <<< "$site_list"
+        site_count=${#sites[@]}
+        counter=0
         for site in "${sites[@]}"; do
-            echo "$site" >> /root/smartSNI/domains.txt
+            counter=$((counter + 1))
+            if [ $counter -eq $site_count ]; then
+                echo "    \"$site\": \"$myip\"" >> /root/smartSNI/config.json
+            else
+                echo "    \"$site\": \"$myip\"," >> /root/smartSNI/config.json
+            fi
         done
+        
+        echo "  }" >> /root/smartSNI/config.json
+        echo "}" >> /root/smartSNI/config.json
 
         nginx_conf="/etc/nginx/sites-enabled/default"
         sed -i "s/server_name _;/server_name $domain;/g" "$nginx_conf"
@@ -127,16 +141,16 @@ uninstall() {
 }
 
 display_sites() {
-    domains_file="/root/smartSNI/domains.txt"
+    config_file="/root/smartSNI/config.json"
 
     if [ -d "/root/smartSNI" ]; then
-        if [ -f "$domains_file" ]; then
-            echo "Current list of sites in $domains_file:"
+        if [ -f "$config_file" ]; then
+            echo "Current configuration in $config_file:"
             echo "---------------------"
-            cat "$domains_file"
+            cat "$config_file"
             echo "---------------------"
         else
-            echo "No domains file found."
+            echo "No config file found."
         fi
     else
         echo "Error: smartSNI directory not found. Please Install first."
