@@ -24,7 +24,7 @@ detect_distribution() {
 install_dependencies() {
     detect_distribution
     $pm update -y
-    local packages=("nginx" "git" "jq" "python3" "python3-pip")
+    local packages=("nginx" "git" "jq" "certbot" "python3-certbot-nginx" "python3" "python3-pip")
     
     for package in "${packages[@]}"; do
         if ! dpkg -s "$package" &> /dev/null 2>&1 && ! rpm -q "$package" &> /dev/null 2>&1; then
@@ -41,12 +41,6 @@ install_dependencies() {
     else
         echo "python3 is already installed."
     fi
-    
-    # Fix certbot pyOpenSSL issue
-    echo "Fixing certbot dependencies..."
-    pip3 install --upgrade pip
-    pip3 install --upgrade pyOpenSSL cryptography
-    $pm install -y certbot python3-certbot-nginx
 }
 
 #install
@@ -56,50 +50,26 @@ install() {
     else
         install_dependencies
         myip=$(hostname -I | awk '{print $1}')
-        git clone https://github.com/smaghili/smartSNIP.git /root/smartSNI
+        # git clone https://github.com/bepass-org/smartSNI.git /root/smartSNI
 
         clear
         read -p "Enter your domain: " domain
         read -p "Enter the domain names separated by commas (example: google,youtube): " site_list
         
+        # Save to domains.txt (just domain list, hostname is auto-detected)
+        > /root/smartSNI/domains.txt
         IFS=',' read -ra sites <<< "$site_list"
-        
-        new_domains="{"
-        for ((i = 0; i < ${#sites[@]}; i++)); do
-            new_domains+="\"${sites[i]}\": \"$myip\""
-            if [ $i -lt $((${#sites[@]}-1)) ]; then
-                new_domains+=", "
-            fi
+        for site in "${sites[@]}"; do
+            echo "$site" >> /root/smartSNI/domains.txt
         done
-        new_domains+="}"
-        
-        json_content="{ \"host\": \"$domain\", \"domains\": $new_domains }"
-        
-        echo "$json_content" | jq '.' > /root/smartSNI/config.json
 
         nginx_conf="/etc/nginx/sites-enabled/default"
         sed -i "s/server_name _;/server_name $domain;/g" "$nginx_conf"
-        sed -i "s/<YOUR_HOST>/$domain/g" /root/smartSNI/nginx.conf
-
-        # Obtain SSL certificates
-        echo "Obtaining SSL certificate for $domain..."
-        certbot --nginx -d $domain --register-unsafely-without-email --non-interactive --agree-tos --redirect
-        
-        if [ $? -ne 0 ]; then
-            echo "Warning: SSL certificate failed. Continuing without SSL..."
-            echo "You can manually run: certbot --nginx -d $domain"
-        fi
-
-        # Copy config
-        sudo cp /root/smartSNI/nginx.conf "$nginx_conf"
-
-        # Restart nginx
         systemctl restart nginx
-        
-        if [ $? -ne 0 ]; then
-            echo "Nginx failed to start. Checking configuration..."
-            nginx -t
-        fi
+        certbot --nginx -d $domain --register-unsafely-without-email --non-interactive --agree-tos --redirect
+        sed -i "s/<YOUR_HOST>/$domain/g" /root/smartSNI/nginx.conf
+        sudo cp /root/smartSNI/nginx.conf "$nginx_conf"
+        systemctl restart nginx
 
         # Install Python dependencies
         cd /root/smartSNI
