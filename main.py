@@ -55,32 +55,48 @@ class Config:
             return "127.0.0.1"
 
     @staticmethod
-    def load_config(config_file: str = "config.json") -> 'Config':
+    def _get_server_hostname() -> str:
         try:
-            with open(config_file, 'r') as file:
-                config_data = json.load(file)
+            import subprocess
+            result = subprocess.run(['hostname', '-f'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                hostname = result.stdout.strip()
+                if '.' in hostname and not hostname.endswith('.localdomain'):
+                    return hostname
+        except:
+            pass
+        
+        try:
+            hostname = socket.getfqdn()
+            if '.' in hostname and not hostname.endswith('.localdomain') and hostname != 'localhost':
+                return hostname
+        except:
+            pass
+        
+        return "localhost"
+
+    @staticmethod
+    def load_config(domains_file: str = "domains.txt") -> 'Config':
+        try:
+            with open(domains_file, 'r') as file:
+                domain_lines = [line.strip() for line in file.readlines() if line.strip() and not line.strip().startswith('#')]
         except FileNotFoundError:
-            logger.fatal(f"Config file '{config_file}' not found")
-            sys.exit(1)
-        except json.JSONDecodeError as e:
-            logger.fatal(f"Invalid JSON in config file: {e}")
-            sys.exit(1)
-        
-        host = config_data.get('host', 'localhost')
-        domains_map = config_data.get('domains', {})
-        
-        if not isinstance(domains_map, dict):
-            logger.fatal("'domains' must be a JSON object/map")
-            sys.exit(1)
+            logger.warning(f"Domains file '{domains_file}' not found, using empty domain list")
+            domain_lines = []
         
         server_ip = Config._get_server_ip()
+        host = Config._get_server_hostname()
         
         logger.info(f"Detected server IP: {server_ip}")
-        logger.info(f"Configured hostname: {host}")
+        logger.info(f"Detected server hostname: {host}")
+        
+        domains = {}
+        for domain in domain_lines:
+            domains[domain] = server_ip
         
         return Config(
             host=host,
-            domains=domains_map,
+            domains=domains,
             server_ip=server_ip
         )
 
@@ -160,31 +176,37 @@ class DNSHandler:
             except ValueError:
                 raise ValueError("Invalid IP address")
 
-            response_message = message.make_response(dns_message)
-            rrset = dns.rrset.RRset(question.name, rdataclass.IN, rdatatype.A)
-            rrset.ttl = 3600
-            rrset.add(A(rdataclass.IN, rdatatype.A, str(ip_address)))
-            response_message.answer.append(rrset)
+            response_message = dns_message.make_response()
+            answer_rr = A(
+                rdataclass.IN,
+                rdatatype.A,
+                str(ip_address)
+            )
+            rrset = dns.rrset.from_rdata(question.name, 3600, answer_rr)
+            response_message.answer.append(rrset[0])
             return response_message.to_wire()
 
         async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    "https://1.1.1.1/dns-query",
-                    data=query_bytes,
-                    headers={"Content-Type": "application/dns-message"},
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as resp:
-                    if resp.status == 200:
-                        response_data = await resp.read()
-                        return response_data
-                    else:
-                        raise ValueError(f"Cloudflare DoH returned status {resp.status}")
-            except Exception as e:
-                logger.warning(f"Cloudflare DoH failed: {e}")
-                response_message = message.make_response(dns_message)
-                response_message.set_rcode(dns.rcode.SERVFAIL)
-                return response_message.to_wire()
+            async with session.post(
+                "https://1.1.1.1/dns-query",
+                data=query_bytes,
+                headers={"Content-Type": "application/dns-message"}
+            ) as response:
+                buffer = self.buffer_pool.get()
+                try:
+                    chunk = await response.content.read(len(buffer))
+                    if len(chunk) < len(buffer):
+                        return chunk
+                    
+                    result = bytearray(chunk)
+                    while True:
+                        chunk = await response.content.read(len(buffer))
+                        if not chunk:
+                            break
+                        result.extend(chunk)
+                    return bytes(result)
+                finally:
+                    self.buffer_pool.put(buffer)
 
 
 class DOHServer:
@@ -232,9 +254,6 @@ class DOHServer:
         try:
             dns_response = await self.dns_handler.process_dns_query(query_bytes)
         except Exception as e:
-            logger.error(f"DNS query error: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
             return web.Response(
                 text=f"Failed to process DNS query: {str(e)}",
                 status=500
@@ -499,7 +518,7 @@ class SNIProxy:
 
 async def main():
     try:
-        config = Config.load_config("config.json")
+        config = Config.load_config("domains.txt")
     except Exception as e:
         logger.fatal(f"Failed to load configuration: {e}")
         sys.exit(1)
@@ -514,15 +533,12 @@ async def main():
 
     logger.info("Starting Smart SNI proxy server on :443, :853...")
 
-    try:
-        await asyncio.gather(
-            doh_server.run(host="127.0.0.1", port=8080),
-            dot_server.run(port=853),
-            sni_proxy.run(port=443)
-        )
-    except Exception as e:
-        logger.fatal(f"Server failed to start: {e}")
-        raise
+    await asyncio.gather(
+        doh_server.run(host="127.0.0.1", port=8080),
+        dot_server.run(port=853),
+        sni_proxy.run(port=443),
+        return_exceptions=True
+    )
 
 
 if __name__ == "__main__":
