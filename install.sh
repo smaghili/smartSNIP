@@ -50,7 +50,7 @@ install() {
     else
         install_dependencies
         myip=$(hostname -I | awk '{print $1}')
-        # git clone https://github.com/bepass-org/smartSNI.git /root/smartSNI
+        git clone https://github.com/bepass-org/smartSNI.git /root/smartSNI
 
         clear
         read -p "Enter your domain: " domain
@@ -65,10 +65,16 @@ install() {
 
         nginx_conf="/etc/nginx/sites-enabled/default"
         sed -i "s/server_name _;/server_name $domain;/g" "$nginx_conf"
-        systemctl restart nginx
-        certbot --nginx -d $domain --register-unsafely-without-email --non-interactive --agree-tos --redirect
         sed -i "s/<YOUR_HOST>/$domain/g" /root/smartSNI/nginx.conf
+
+        # Obtain SSL certificates
+        certbot --nginx -d $domain --register-unsafely-without-email --non-interactive --agree-tos --redirect
+
+        # Copy config
         sudo cp /root/smartSNI/nginx.conf "$nginx_conf"
+
+        # Stop and restart nginx
+        systemctl stop nginx
         systemctl restart nginx
 
         # Install Python dependencies
