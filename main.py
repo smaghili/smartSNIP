@@ -5,12 +5,9 @@ import gc
 import ipaddress
 import json
 import logging
-import ssl
-import socket
 import struct
 import sys
 import time
-import io
 from queue import Queue
 from threading import Lock
 from typing import Dict, Optional, Tuple
@@ -280,62 +277,67 @@ class DOTServer:
             await server.serve_forever()
 
 
-class ReadOnlyConn:
-    def __init__(self, reader: io.BytesIO):
-        self.reader = reader
-
-    def read(self, size: int = -1) -> bytes:
-        return self.reader.read(size)
-
-    def write(self, data: bytes) -> int:
-        raise io.UnsupportedOperation("write not supported")
-
-    def close(self) -> None:
-        pass
-
-    def getpeername(self) -> Tuple:
-        return ("", 0)
-
-    def getsockname(self) -> Tuple:
-        return ("", 0)
-
-    def settimeout(self, timeout: float) -> None:
-        pass
-
-    def gettimeout(self) -> Optional[float]:
-        return None
-
-
 class SNIProxy:
     def __init__(self, config: Config):
         self.config = config
 
     def _read_client_hello(self, data: bytes) -> Optional[str]:
         try:
-            sni_callback_called = False
-            captured_sni = [None]
-
-            def sni_callback(ssl_sock, server_name, ssl_context):
-                nonlocal sni_callback_called
-                sni_callback_called = True
-                captured_sni[0] = server_name
+            if len(data) < 43:
                 return None
-
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            ssl_context.set_servername_callback(sni_callback)
-
-            read_only_conn = ReadOnlyConn(io.BytesIO(data))
-            ssl_sock = ssl_context.wrap_socket(read_only_conn, server_side=True)
-
-            try:
-                ssl_sock.do_handshake()
-            except (ssl.SSLError, OSError):
-                pass
-
-            if sni_callback_called:
-                return captured_sni[0]
+            
+            if data[0] != 0x16:
+                return None
+            
+            pos = 43
+            
+            if pos + 1 > len(data):
+                return None
+            session_id_length = data[pos]
+            pos += 1 + session_id_length
+            
+            if pos + 2 > len(data):
+                return None
+            cipher_suites_length = struct.unpack('!H', data[pos:pos+2])[0]
+            pos += 2 + cipher_suites_length
+            
+            if pos + 1 > len(data):
+                return None
+            compression_methods_length = data[pos]
+            pos += 1 + compression_methods_length
+            
+            if pos + 2 > len(data):
+                return None
+            extensions_length = struct.unpack('!H', data[pos:pos+2])[0]
+            pos += 2
+            
+            extensions_end = pos + extensions_length
+            while pos + 4 <= extensions_end:
+                extension_type = struct.unpack('!H', data[pos:pos+2])[0]
+                extension_length = struct.unpack('!H', data[pos+2:pos+4])[0]
+                pos += 4
+                
+                if extension_type == 0:
+                    if pos + 2 > len(data):
+                        return None
+                    server_name_list_length = struct.unpack('!H', data[pos:pos+2])[0]
+                    pos += 2
+                    
+                    if pos + server_name_list_length > len(data):
+                        return None
+                    
+                    if pos + 3 <= len(data):
+                        name_type = data[pos]
+                        name_length = struct.unpack('!H', data[pos+1:pos+3])[0]
+                        pos += 3
+                        
+                        if name_type == 0 and pos + name_length <= len(data):
+                            server_name = data[pos:pos+name_length].decode('utf-8', errors='ignore')
+                            return server_name
+                    return None
+                
+                pos += extension_length
+            
             return None
         except Exception:
             return None
@@ -344,21 +346,21 @@ class SNIProxy:
         try:
             peeked_data = bytearray()
             
-            first_byte = await asyncio.wait_for(reader.read(1), timeout=5.0)
+            first_byte = await asyncio.wait_for(reader.readexactly(1), timeout=5.0)
             if not first_byte:
                 return None, b""
             
             peeked_data.extend(first_byte)
             
             if first_byte[0] == 0x16:
-                record_header = await asyncio.wait_for(reader.read(4), timeout=5.0)
+                record_header = await asyncio.wait_for(reader.readexactly(4), timeout=5.0)
                 if len(record_header) < 4:
                     return None, b""
                 
                 peeked_data.extend(record_header)
                 record_length = struct.unpack("!H", record_header[2:4])[0]
                 
-                record_body = await asyncio.wait_for(reader.read(record_length), timeout=5.0)
+                record_body = await asyncio.wait_for(reader.readexactly(record_length), timeout=5.0)
                 if len(record_body) < record_length:
                     return None, b""
                 
@@ -369,6 +371,8 @@ class SNIProxy:
             
             return None, bytes(peeked_data)
         except asyncio.TimeoutError:
+            return None, b""
+        except asyncio.IncompleteReadError:
             return None, b""
         except Exception as e:
             logger.error(f"Error peeking client hello: {e}")
