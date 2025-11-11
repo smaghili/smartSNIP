@@ -117,14 +117,14 @@ class DNSHandler:
             except ValueError:
                 raise ValueError("Invalid IP address")
 
-            response_message = dns_message.make_response()
+            response_message = message.make_response(dns_message)
             answer_rr = A(
                 rdataclass.IN,
                 rdatatype.A,
                 str(ip_address)
             )
             rrset = dns.rrset.from_rdata(question.name, 3600, answer_rr)
-            response_message.answer.append(rrset[0])
+            response_message.answer.append(rrset)
             return response_message.to_wire()
 
         async with aiohttp.ClientSession() as session:
@@ -195,8 +195,9 @@ class DOHServer:
         try:
             dns_response = await self.dns_handler.process_dns_query(query_bytes)
         except Exception as e:
+            logger.error(f"DNS query processing error: {e}", exc_info=True)
             return web.Response(
-                text="Failed to process DNS query",
+                text=f"Failed to process DNS query: {str(e)}",
                 status=500
             )
 
