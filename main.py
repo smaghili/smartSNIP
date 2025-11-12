@@ -14,6 +14,7 @@ from threading import Lock
 from collections import deque
 import ssl
 import ipaddress
+import socket
 
 import aiohttp
 from aiohttp import web
@@ -40,8 +41,8 @@ logger = logging.getLogger("sni_proxy")
 PROXY_URL = "socks5://127.0.0.1:40000"
 DOH_UPSTREAM = "https://1.1.1.1/dns-query"
 DOH_TIMEOUT = 10.0
-BACKEND_CONNECT_TIMEOUT = 15.0
-BACKEND_RW_TIMEOUT = 30.0
+BACKEND_CONNECT_TIMEOUT = 25.0
+BACKEND_RW_TIMEOUT = 60.0
 IDLE_CONNECTION_TIMEOUT = 300.0  # seconds: close backend connections unused for this long
 POOL_MAX_PER_HOST = 16  # max backend connections cached per host
 GLOBAL_BACKEND_CONNECTION_LIMIT = 2000  # semaphore globally limiting backend connections
@@ -398,11 +399,19 @@ class SNIProxy:
                     open_connection(proxy_url=PROXY_URL, host=target_address, port=target_port, ssl=False),
                     timeout=BACKEND_CONNECT_TIMEOUT,
                 )
+                sock = writer.get_extra_info("socket")
+                if sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             else:
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(target_address, target_port),
                     timeout=BACKEND_CONNECT_TIMEOUT,
                 )
+                sock = writer.get_extra_info("socket")
+                if sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             return BackendConn(reader=reader, writer=writer, last_used=now_ts(), in_use=True)
         except Exception:
             # release permit on failure
@@ -460,9 +469,13 @@ class SNIProxy:
                         if val == "warp":
                             use_warp = True
                         elif self._is_ip(val):
-                            target_address = target_host
+                            target_address = val
                         break
                 logger.info("SNIProxy: incoming host=%s use_warp=%s target_address=%s", target_host, use_warp, target_address)
+                # Prevent loop in case of self-referencing IP
+                if target_address == self.config.server_ip:
+                    logger.warning("SNIProxy: Detected loop for %s (self IP %s) -> redirecting to real domain", target_host, target_address)
+                    target_address = target_host
 
             host_pool = self._get_host_pool(target_host)
 
@@ -484,13 +497,17 @@ class SNIProxy:
                 conn.writer.write(peeked_bytes)
                 await conn.writer.drain()
             except Exception as e:
-                logger.warning("SNIProxy: failed to write peeked bytes to backend %s: %s", target_host, e)
-                # close this backend and bail
+                logger.warning("SNIProxy: failed to write peeked bytes to backend %s: %s (retrying once...)", target_host, e)
                 try:
                     await self._safe_close_backend(conn)
-                except:
-                    pass
-                return
+                    await asyncio.sleep(0.3)
+                    conn = await self._create_backend_connection(target_address, target_port, use_warp)
+                    conn.writer.write(peeked_bytes)
+                    await conn.writer.drain()
+                except Exception as e2:
+                    logger.error("SNIProxy: retry also failed for %s: %s", target_host, e2)
+                    await self._safe_close_backend(conn)
+                    return
 
             # Set timestamps
             conn.touch()
@@ -522,14 +539,11 @@ class SNIProxy:
                     return_exceptions=True,
                 )
             finally:
-                # When finished, attempt to return backend conn to pool for reuse
                 conn.in_use = False
                 conn.touch()
                 if created_new:
-                    # If created now, try to add to pool (if pool not full)
                     await host_pool.release(conn)
                 else:
-                    # returning conn to pool (host_pool.release handles capacity)
                     await host_pool.release(conn)
         except Exception as e:
             logger.exception("SNIProxy: error handling connection: %s", e)
@@ -549,7 +563,6 @@ class SNIProxy:
         try:
             while self.running:
                 await asyncio.sleep(30)
-                # Evict idle backend conns
                 for host, pool in list(self.host_pools.items()):
                     try:
                         await pool.evict_idle(IDLE_CONNECTION_TIMEOUT)
