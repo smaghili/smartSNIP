@@ -1,6 +1,11 @@
 {
-  "host": "dns.hamshahripanel.ir",
+  "host": "ssm.hamshahripanel.ir",
+  "server_ip": "65.109.195.175",
   "domains": {
-    "kmplayer": "82.115.13.136"
+    "kmplayer.com": "warp",
+    "www.kmplayer.com": "warp",
+    "api.ipify.org": "warp",
+    "ifconfig.me": "warp",
+    "icanhazip.com": "warp"
   }
 }
