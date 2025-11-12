@@ -459,7 +459,7 @@ class SNIProxy:
                 target_address = "127.0.0.1"
                 target_port = 8443
                 use_warp = False
-                logger.info("SNIProxy: routing internal host %s -> 127.0.0.1:8443", target_host)
+                logger.debug("SNIProxy: routing internal host %s -> 127.0.0.1:8443", target_host)
             else:
                 target_address = target_host
                 target_port = 443
@@ -472,7 +472,7 @@ class SNIProxy:
                         elif self._is_ip(val):
                             target_address = val
                         break
-                logger.info("SNIProxy: incoming host=%s use_warp=%s target_address=%s", target_host, use_warp, target_address)
+                logger.debug("SNIProxy: incoming host=%s use_warp=%s target_address=%s", target_host, use_warp, target_address)
                 # Prevent loop in case of self-referencing IP
                 if target_address == self.config.server_ip:
                     logger.warning("SNIProxy: Detected loop for %s (self IP %s) -> redirecting to real domain", target_host, target_address)
@@ -614,7 +614,10 @@ class SNIProxy:
         """Watchdog coroutine to automatically recover from semaphore exhaustion"""
         while self.running:
             await asyncio.sleep(120)
-            locked = self.global_semaphore._value
+            try:
+                locked = getattr(self.global_semaphore, "_value", 1)
+            except Exception:
+                locked = 1
             if locked <= 0:
                 logger.warning("Watchdog: global semaphore exhausted, resetting pools")
                 for host, pool in list(self.host_pools.items()):
@@ -635,34 +638,40 @@ class DOHServer:
         self.app: Optional[web.Application] = None
 
     async def handle_doh_request(self, request: web.Request) -> web.Response:
-        if not self.rate_limiter.allow():
-            return web.Response(text="Rate limit exceeded", status=429)
-
-        if request.method == "GET":
-            dns_param = request.query.get("dns")
-            if not dns_param:
-                return web.Response(text="Missing 'dns' parameter", status=400)
-            try:
-                padding = 4 - (len(dns_param) % 4)
-                if padding != 4:
-                    dns_param += "=" * padding
-                query_bytes = base64.urlsafe_b64decode(dns_param)
-            except Exception:
-                return web.Response(text="Invalid 'dns' parameter", status=400)
-        elif request.method == "POST":
-            query_bytes = await request.read()
-            if len(query_bytes) == 0:
-                return web.Response(text="Empty request body", status=400)
-        else:
-            return web.Response(text="Only GET and POST allowed", status=405)
-
         try:
-            resp = await self.dns_handler.process_dns_query(query_bytes)
-        except Exception as e:
-            logger.exception("DOHServer: DNS processing error: %s", e)
-            return web.Response(text=f"Failed to process DNS query: {e}", status=500)
+            if not self.rate_limiter.allow():
+                return web.Response(text="Rate limit exceeded", status=429)
 
-        return web.Response(body=resp, content_type="application/dns-message", status=200)
+            if request.method == "GET":
+                dns_param = request.query.get("dns")
+                if not dns_param:
+                    return web.Response(text="Missing 'dns' parameter", status=400)
+                try:
+                    padding = 4 - (len(dns_param) % 4)
+                    if padding != 4:
+                        dns_param += "=" * padding
+                    query_bytes = base64.urlsafe_b64decode(dns_param)
+                except Exception:
+                    return web.Response(text="Invalid 'dns' parameter", status=400)
+            elif request.method == "POST":
+                query_bytes = await request.read()
+                if len(query_bytes) == 0:
+                    return web.Response(text="Empty request body", status=400)
+            else:
+                return web.Response(text="Only GET and POST allowed", status=405)
+
+            try:
+                resp = await self.dns_handler.process_dns_query(query_bytes)
+            except Exception as e:
+                logger.exception("DOHServer: DNS processing error: %s", e)
+                return web.Response(text=f"Failed to process DNS query: {e}", status=500)
+
+            return web.Response(body=resp, content_type="application/dns-message", status=200)
+
+        except Exception as e:
+            # Handle unexpected input gracefully
+            logger.debug(f"DOHServer: unexpected input: {e}")
+            return web.Response(status=400, text="Bad Request")
 
     async def create_app(self) -> web.Application:
         self.app = web.Application()
