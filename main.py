@@ -289,7 +289,7 @@ class HostPool:
                     continue
                 if now - conn.last_used > idle_timeout:
                     # close
-                    self.active_count -= 1
+                    self.active_count = max(0, self.active_count - 1)
                     await conn.close()
                 else:
                     new_idle.append(conn)
@@ -305,6 +305,7 @@ class SNIProxy:
         self.global_semaphore = asyncio.Semaphore(GLOBAL_BACKEND_CONNECTION_LIMIT)
         self.accept_semaphore = asyncio.Semaphore(MAX_CONCURRENT_ACCEPTS)
         self.cleanup_task: Optional[asyncio.Task] = None
+        self.watchdog_task: Optional[asyncio.Task] = None
         self.running = False
 
     def _is_ip(self, val: str) -> bool:
@@ -530,6 +531,9 @@ class SNIProxy:
                             break
                 except Exception:
                     pass
+                finally:
+                    dst_writer.close()
+                    await dst_writer.wait_closed()
 
             # Run bidirectional copy
             try:
@@ -558,6 +562,11 @@ class SNIProxy:
                 self.accept_semaphore.release()
             except Exception:
                 pass
+            # Ensure semaphore is always released even if connection was interrupted
+            try:
+                self.global_semaphore.release()
+            except Exception:
+                pass
 
     async def _cleanup_loop(self):
         try:
@@ -574,6 +583,7 @@ class SNIProxy:
     async def run(self, port: int = 443):
         self.running = True
         self.cleanup_task = asyncio.create_task(self._cleanup_loop())
+        self.watchdog_task = asyncio.create_task(self.watchdog())
         server = await asyncio.start_server(self.handle_connection, "0.0.0.0", port, limit=2**16)
         logger.info("SNI Proxy started on port %d", port)
         async with server:
@@ -587,12 +597,33 @@ class SNIProxy:
                 await self.cleanup_task
             except Exception:
                 pass
+        if self.watchdog_task:
+            self.watchdog_task.cancel()
+            try:
+                await self.watchdog_task
+            except Exception:
+                pass
         # close all backend connections
         for host, pool in list(self.host_pools.items()):
             async with pool.lock:
                 while pool.idle:
                     conn = pool.idle.popleft()
                     await conn.close()
+
+    async def watchdog(self):
+        """Watchdog coroutine to automatically recover from semaphore exhaustion"""
+        while self.running:
+            await asyncio.sleep(120)
+            locked = self.global_semaphore._value
+            if locked <= 0:
+                logger.warning("Watchdog: global semaphore exhausted, resetting pools")
+                for host, pool in list(self.host_pools.items()):
+                    async with pool.lock:
+                        while pool.idle:
+                            conn = pool.idle.popleft()
+                            await conn.close()
+                self.global_semaphore = asyncio.Semaphore(GLOBAL_BACKEND_CONNECTION_LIMIT)
+                logger.info("Watchdog: semaphore reset complete")
 
 # -----------------------
 # DOH Server (aiohttp) wiring
