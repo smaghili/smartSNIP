@@ -1,12 +1,13 @@
 # Smart SNI and DNS Proxy Server
 
-Python-based DNS proxy with DoH/DoT support, SNI-based HTTPS proxying, and whitelist-only domain filtering.
+Production-ready SNI-based HTTPS proxy with DNS-over-HTTPS (DoH) and DNS-over-TLS (DoT) support.
 
 ## Features
 
 - **DNS-over-HTTPS (DoH)** and **DNS-over-TLS (DoT)** support
-- **Whitelist-only mode**: Only domains in `config.json` are proxied, others return REFUSED
-- **SNI Proxy**: Transparently proxies HTTPS traffic for whitelisted domains
+- **SNI Proxy**: Transparent HTTPS traffic routing
+- **Warp Support**: SOCKS5 proxy routing
+- **Auto-Recovery**: Watchdog prevents resource exhaustion
 - **Rate limiting** with token bucket algorithm
 
 ## Configuration
@@ -16,22 +17,41 @@ Edit `config.json`:
 ```json
 {
   "host": "your-domain.com",
+  "server_ip": "YOUR_SERVER_IP",
   "domains": {
-    "youtube": "1.2.3.4",
-    "google": "1.2.3.4",
-    "facebook": "1.2.3.4"
+    "youtube.com": "1.2.3.4",
+    "google.com": "1.2.3.4",
+    "facebook.com": "1.2.3.4",
+    "instagram.com": "warp",
+    "*.tiktok.com": "warp"
   }
 }
 ```
 
-Replace `1.2.3.4` with your server's public IP address.
-
-Only domains in the list will be resolved through your proxy (returning your server's IP). All other DNS queries are resolved via Cloudflare DoH (1.1.1.1).
+- **IP Address**: Route directly to specified IP
+- **`"warp"`**: Route through SOCKS5 proxy
+- **Wildcard**: Use `*.domain.com` for subdomains
 
 ## Installation
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNI/main/install.sh)
+```
+
+## Service Ports
+
+- **443**: SNI Proxy (HTTPS)
+- **8080**: DNS-over-HTTPS (DoH)
+- **853**: DNS-over-TLS (DoT)
+
+## Quick Test
+
+```bash
+# Test DoH
+curl "http://localhost:8080/dns-query?dns=AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB"
+
+# Test SNI Proxy
+curl -k https://your-domain.com
 ```
 
 ## Contributions
