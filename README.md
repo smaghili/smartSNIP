@@ -35,7 +35,7 @@ Edit `config.json`:
 ## Installation
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNI/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/install.sh)
 ```
 
 ## Service Ports
@@ -65,3 +65,4 @@ Special thanks to [Peyman](https://github.com/Ptechgithub) for auto install scri
 ## License
 
 This project is open-source and available under the [MIT License](LICENSE).
+
