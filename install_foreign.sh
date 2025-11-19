@@ -128,7 +128,7 @@ install_foreign_server() {
     
     install_dependencies
     
-    INSTALL_DIR="/root/smartSNI"
+    INSTALL_DIR="/root/smartDNS"
     mkdir -p "$INSTALL_DIR"
     
     echo ""
@@ -178,9 +178,16 @@ EOF
     cat "$INSTALL_DIR/foreign_config.json"
     echo ""
     
-    echo "Copying server files..."
-    cp foreign_server.py "$INSTALL_DIR/"
+    echo "Downloading foreign_server.py from GitHub..."
+    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/foreign_server.py -o "$INSTALL_DIR/foreign_server.py"
+    
+    if [ ! -f "$INSTALL_DIR/foreign_server.py" ]; then
+        echo "ERROR: Failed to download foreign_server.py"
+        exit 1
+    fi
+    
     chmod +x "$INSTALL_DIR/foreign_server.py"
+    echo "foreign_server.py downloaded successfully!"
     
     echo "Installing Python dependencies..."
     cd "$INSTALL_DIR"

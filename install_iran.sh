@@ -53,7 +53,7 @@ install_iran_server() {
     
     install_dependencies
     
-    INSTALL_DIR="/root/smartSNI"
+    INSTALL_DIR="/root/smartDNS"
     mkdir -p "$INSTALL_DIR"
     
     echo ""
@@ -118,9 +118,16 @@ EOF
     cat "$INSTALL_DIR/iran_config.json"
     echo ""
     
-    echo "Copying server files..."
-    cp iran_server.py "$INSTALL_DIR/"
+    echo "Downloading iran_server.py from GitHub..."
+    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/iran_server.py -o "$INSTALL_DIR/iran_server.py"
+    
+    if [ ! -f "$INSTALL_DIR/iran_server.py" ]; then
+        echo "ERROR: Failed to download iran_server.py"
+        exit 1
+    fi
+    
     chmod +x "$INSTALL_DIR/iran_server.py"
+    echo "iran_server.py downloaded successfully!"
     
     echo "Installing Python dependencies..."
     cd "$INSTALL_DIR"
