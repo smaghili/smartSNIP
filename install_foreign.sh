@@ -197,6 +197,23 @@ EOF
     
     echo ""
     echo "======================================"
+    echo "Obtaining SSL certificate..."
+    echo "======================================"
+    
+    # First get SSL certificate using standalone mode
+    systemctl stop nginx 2>/dev/null || true
+    certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email
+    
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to obtain SSL certificate!"
+        echo "Make sure DNS points to this server and port 80 is open."
+        exit 1
+    fi
+    
+    echo "SSL certificate obtained successfully!"
+    
+    echo ""
+    echo "======================================"
     echo "Configuring Nginx with SSL..."
     echo "======================================"
     
@@ -249,20 +266,13 @@ EOF
     rm -f /etc/nginx/sites-enabled/default
     
     echo "Testing Nginx configuration..."
-    nginx -t
-    
-    echo ""
-    echo "Obtaining SSL certificate..."
-    certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email
-    
-    if [ $? -eq 0 ]; then
-        echo "SSL certificate obtained successfully!"
+    if nginx -t; then
+        echo "Nginx configuration is valid!"
+        systemctl restart nginx
     else
-        echo "ERROR: Failed to obtain SSL certificate!"
+        echo "ERROR: Nginx configuration test failed!"
         exit 1
     fi
-    
-    systemctl restart nginx
     
     echo ""
     echo "======================================"

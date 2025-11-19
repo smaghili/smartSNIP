@@ -137,7 +137,24 @@ EOF
     
     echo ""
     echo "======================================"
-    echo "Configuring Nginx..."
+    echo "Obtaining SSL certificate..."
+    echo "======================================"
+    
+    # First get SSL certificate using standalone mode
+    systemctl stop nginx 2>/dev/null || true
+    certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email
+    
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to obtain SSL certificate!"
+        echo "Make sure DNS points to this server and port 80 is open."
+        exit 1
+    fi
+    
+    echo "SSL certificate obtained successfully!"
+    
+    echo ""
+    echo "======================================"
+    echo "Configuring Nginx with SSL..."
     echo "======================================"
     
     nginx_conf="/etc/nginx/sites-enabled/default"
@@ -183,17 +200,14 @@ server {
 }
 EOF
     
-    echo "Obtaining SSL certificate..."
-    certbot --nginx -d "$domain" --register-unsafely-without-email --non-interactive --agree-tos
-    
-    if [ $? -eq 0 ]; then
-        echo "SSL certificate obtained successfully!"
+    echo "Testing Nginx configuration..."
+    if nginx -t; then
+        echo "Nginx configuration is valid!"
+        systemctl restart nginx
     else
-        echo "WARNING: SSL certificate failed. DoT may not work properly."
+        echo "ERROR: Nginx configuration test failed!"
+        exit 1
     fi
-    
-    systemctl stop nginx
-    systemctl restart nginx
     
     echo ""
     echo "======================================"
