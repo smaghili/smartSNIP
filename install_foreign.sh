@@ -219,10 +219,6 @@ EOF
     
     cat > /etc/nginx/sites-available/doh-server <<EOF
 server {
-    if (\$host = $domain) {
-        return 301 https://\$host\$request_uri;
-    }
-
     listen 80;
     server_name $domain;
 
@@ -242,10 +238,6 @@ server {
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
 
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-
     location /dns-query {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -253,11 +245,6 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location / {
-        return 200 'Foreign DNS Relay Server is running';
-        add_header Content-Type text/plain;
     }
 }
 EOF
