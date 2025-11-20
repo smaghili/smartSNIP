@@ -331,10 +331,10 @@ EOF
     
     sleep 2
     
-    echo "Testing HTTPS DoH endpoint..."
+    echo "Testing HTTPS DoH endpoint on port 4443..."
     test_response=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/dns-message" \
         --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d) \
-        "https://$domain/dns-query" 2>/dev/null || echo "000")
+        "https://$domain:4443/dns-query" 2>/dev/null || echo "000")
     
     http_code=$(echo "$test_response" | tail -n1)
     
@@ -350,15 +350,16 @@ EOF
     echo "Configuration Summary:"
     echo "======================================"
     echo "Domain: $domain"
+    echo "Port: 4443 (DoH over HTTPS)"
     echo "Upstream DNS: $upstream_doh"
     echo ""
     echo "Your DoH URL (use this in iran_config.json):"
-    echo "  https://$domain/dns-query"
+    echo "  https://$domain:4443/dns-query"
     echo ""
     echo "Test your DoH server:"
     echo "  curl -H 'Content-Type: application/dns-message' \\"
     echo "       --data-binary @<(echo -n 'AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB' | base64 -d) \\"
-    echo "       https://$domain/dns-query"
+    echo "       https://$domain:4443/dns-query"
     echo ""
     echo "View logs:"
     echo "  journalctl -u foreign-dns -f"
