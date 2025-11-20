@@ -319,11 +319,11 @@ EOF
     sleep 2
     
     echo "Testing HTTPS DoH endpoint on port 4443..."
-    test_response=$(curl -s -w "\n%{http_code}" -H "Content-Type: application/dns-message" \
-        --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d) \
+    # Test DoH server by checking HTTP status code only
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "Content-Type: application/dns-message" \
+        --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d 2>/dev/null) \
         "https://$domain:4443/dns-query" 2>/dev/null || echo "000")
-    
-    http_code=$(echo "$test_response" | tail -n1)
     
     if [ "$http_code" = "200" ]; then
         echo "✓ DoH server is working correctly!"
