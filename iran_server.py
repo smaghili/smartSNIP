@@ -420,16 +420,29 @@ class SNIProxy:
                 target_address = target_host
                 target_port = 443
                 matched_domain = None
+                
                 for key, val in self.config.domains.items():
                     key_lower = key.lower()
+                    
                     if key_lower in target_host:
                         matched_domain = val
-                        if ":" in val:
+                        
+                        # حالت direct → مستقیم به مقصد اصلی
+                        if val == "direct":
+                            target_address = target_host
+                            target_port = 443
+                        
+                        # حالت IP → یعنی باید از DEFAULT SSH TUNNEL رد شود
+                        elif self._is_ip(val):
+                            target_address = "127.0.0.1"    # tunel
+                            target_port = 60000            # tunel port
+                        
+                        # حالت host:port معمولی
+                        elif ":" in val:
                             parts = val.split(":")
                             target_address = parts[0]
                             target_port = int(parts[1])
-                        elif self._is_ip(val):
-                            target_address = val
+                        
                         break
                 
                 if matched_domain and (":" in matched_domain or self._is_ip(matched_domain)):

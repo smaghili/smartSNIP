@@ -19,100 +19,78 @@ detect_distribution() {
 
 install_dependencies() {
     detect_distribution
-    echo "Updating package list..."
-    $pm update -y
+    $pm update -y >/dev/null 2>&1
     
-    local packages=("nginx" "certbot" "python3-certbot-nginx" "python3" "python3-pip" "curl" "gpg" "lsb-release")
+    local packages=("nginx" "certbot" "python3-certbot-nginx" "python3" "python3-pip" "curl" "gpg" "lsb-release" "stunnel4")
     
     for package in "${packages[@]}"; do
         if ! dpkg -s "$package" &> /dev/null 2>&1 && ! rpm -q "$package" &> /dev/null 2>&1; then
-            echo "$package is not installed. Installing..."
-            $pm install -y "$package"
-        else
-            echo "$package is already installed."
+            $pm install -y "$package" >/dev/null 2>&1
         fi
     done
 }
 
 install_warp() {
     if [[ "$pm" != "apt-get" ]]; then
-        echo "Cloudflare WARP installation currently supports Debian and Ubuntu hosts."
         return 1
     fi
-    
-    echo ""
-    echo "======================================"
-    echo "Installing Cloudflare WARP..."
-    echo "======================================"
     
     if command -v warp-cli &> /dev/null; then
         read -p "WARP is already installed. Reconfigure it now? (y/n): " reconfigure
         if [[ ! "$reconfigure" =~ ^[Yy]$ ]]; then
-            echo "Skipping WARP configuration."
             return 0
         fi
     else
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
-        apt-get update -y
-        apt-get install -y cloudflare-warp
+        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" > /etc/apt/sources.list.d/cloudflare-client.list 2>/dev/null
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y cloudflare-warp >/dev/null 2>&1
         if ! command -v warp-cli &> /dev/null; then
-            echo "ERROR: Cloudflare WARP installation failed."
             return 1
         fi
     fi
     
-    systemctl enable --now warp-svc
+    systemctl enable --now warp-svc >/dev/null 2>&1
     sleep 2
     
     warp-cli registration delete &> /dev/null
-    if ! warp-cli registration new; then
-        echo "ERROR: WARP registration failed."
+    if ! warp-cli registration new >/dev/null 2>&1; then
         return 1
     fi
     
     while true; do
         read -p "Enter your WARP license key: " warp_license
         if [ -z "$warp_license" ]; then
-            echo "ERROR: License key cannot be empty."
             continue
         fi
-        if warp-cli registration license "$warp_license"; then
-            echo "License applied successfully."
+        if warp-cli registration license "$warp_license" >/dev/null 2>&1; then
             break
         fi
         read -p "Invalid license key. Try again? (y/n): " retry
         if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-            echo "WARP configuration cancelled."
             return 1
         fi
     done
     
     warp-cli disconnect &> /dev/null
-    if ! warp-cli mode proxy; then
-        echo "ERROR: Failed to set WARP proxy mode."
+    if ! warp-cli mode proxy >/dev/null 2>&1; then
         return 1
     fi
     
-    if ! warp-cli proxy port 50000; then
-        echo "ERROR: Failed to bind WARP proxy to port 50000."
+    if ! warp-cli proxy port 50000 >/dev/null 2>&1; then
         return 1
     fi
     
-    if ! warp-cli connect; then
-        echo "ERROR: WARP connection failed."
+    if ! warp-cli connect >/dev/null 2>&1; then
         return 1
     fi
     
     sleep 2
-    warp-cli status || true
     
     if ss -ltnp 2>/dev/null | grep -q 50000 || netstat -plant 2>/dev/null | grep -q 50000; then
-        echo "WARP SOCKS5 proxy is listening on port 50000"
         return 0
     fi
     
-    echo "WARNING: Port 50000 is not listening yet. Verify manually with ss -ltnp | grep 50000"
     return 1
 }
 
@@ -122,20 +100,12 @@ install_foreign_server() {
         exit 1
     fi
 
-    echo "=========================================="
-    echo "  Foreign DNS Relay Server Installation"
-    echo "=========================================="
-    
     install_dependencies
     
     INSTALL_DIR="/root/smartDNS"
     mkdir -p "$INSTALL_DIR"
     
-    echo ""
-    echo "======================================"
-    echo "Configuration"
-    echo "======================================"
-    
+    echo "[1/8] Configuration"
     read -p "Enter your foreign server domain name (e.g., foreign.example.com): " domain
     if [ -z "$domain" ]; then
         echo "ERROR: Domain cannot be empty!"
@@ -163,9 +133,54 @@ install_foreign_server() {
             upstream_doh="https://1.1.1.1/dns-query"
             ;;
     esac
+    echo "✓ [1/8] Configuration completed"
     
-    echo ""
-    echo "Creating configuration file..."
+    echo "[2/8] Installing and configuring Stunnel (Server mode)"
+    
+    systemctl stop stunnel4 2>/dev/null || true
+    systemctl disable stunnel4 2>/dev/null || true
+    rm -f /etc/stunnel/*.conf 2>/dev/null || true
+    
+    sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4 2>/dev/null || true
+    
+    if ! openssl req -new -x509 -days 3650 -nodes \
+        -out /etc/stunnel/stunnel.pem \
+        -keyout /etc/stunnel/stunnel.pem \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" 2>/dev/null; then
+        echo "✗ [2/8] Failed to create Stunnel certificate"
+        exit 1
+    fi
+    
+    if ! cat > /etc/stunnel/tunnel-server.conf 2>/dev/null <<EOF
+client = no
+foreground = no
+output = /var/log/stunnel-server.log
+pid = /run/stunnel4-server.pid
+sslVersion = TLSv1.3
+options = NO_RENEGOTIATION
+
+[foreign-tunnel]
+accept = 6001
+connect = 127.0.0.1:443
+cert = /etc/stunnel/stunnel.pem
+key  = /etc/stunnel/stunnel.pem
+verify = 0
+EOF
+    then
+        echo "✗ [2/8] Failed to create Stunnel config (disk full?)"
+        df -h /etc
+        exit 1
+    fi
+    
+    if systemctl restart stunnel4 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4; then
+        echo "✓ [2/8] Stunnel configured (0.0.0.0:6001 → 127.0.0.1:443)"
+    else
+        echo "✗ [2/8] Stunnel failed to start"
+        systemctl status stunnel4 --no-pager
+        exit 1
+    fi
+    
+    echo "[3/8] Creating configuration and downloading server code"
     cat > "$INSTALL_DIR/foreign_config.json" <<EOF
 {
   "upstream_doh": "$upstream_doh",
@@ -174,12 +189,7 @@ install_foreign_server() {
 }
 EOF
     
-    echo "Configuration created:"
-    cat "$INSTALL_DIR/foreign_config.json"
-    echo ""
-    
-    echo "Downloading foreign_server.py from GitHub..."
-    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/foreign_server.py -o "$INSTALL_DIR/foreign_server.py"
+    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/foreign_server.py -o "$INSTALL_DIR/foreign_server.py" 2>/dev/null
     
     if [ ! -f "$INSTALL_DIR/foreign_server.py" ]; then
         echo "ERROR: Failed to download foreign_server.py"
@@ -187,38 +197,36 @@ EOF
     fi
     
     chmod +x "$INSTALL_DIR/foreign_server.py"
-    echo "foreign_server.py downloaded successfully!"
+    echo "✓ [3/8] Configuration created and server code downloaded"
     
-    echo "Installing Python dependencies..."
+    echo "[4/8] Installing Python dependencies"
     cd "$INSTALL_DIR"
-    pip3 install --break-system-packages aiohttp dnspython 2>/dev/null || \
-    pip3 install --user aiohttp dnspython 2>/dev/null || \
-    pip3 install aiohttp dnspython
+    if pip3 install --break-system-packages aiohttp dnspython 2>/dev/null || \
+       pip3 install --user aiohttp dnspython 2>/dev/null || \
+       pip3 install aiohttp dnspython 2>&1; then
+        echo "✓ [4/8] Python dependencies installed"
+    else
+        echo "✗ [4/8] Failed to install Python dependencies"
+        exit 1
+    fi
     
-    echo ""
-    echo "======================================"
-    echo "Obtaining SSL certificate..."
-    echo "======================================"
-    
-    # First get SSL certificate using standalone mode
+    echo "[5/8] Obtaining SSL certificate"
     systemctl stop nginx 2>/dev/null || true
-    certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to obtain SSL certificate!"
+    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email 2>&1; then
+        echo "✓ [5/8] SSL certificate obtained"
+    else
+        echo "✗ [5/8] Failed to obtain SSL certificate"
         echo "Make sure DNS points to this server and port 80 is open."
         exit 1
     fi
     
-    echo "SSL certificate obtained successfully!"
-    
-    echo ""
-    echo "======================================"
-    echo "Configuring Nginx with SSL..."
-    echo "======================================"
-    
+    echo "[6/8] Configuring Nginx"
     cat > /etc/nginx/sites-available/doh-server <<EOF
 server {
+    if (\$host = $domain) {
+        return 301 https://\$host\$request_uri;
+    }
+
     listen 80;
     server_name $domain;
 
@@ -238,6 +246,10 @@ server {
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
 
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
     location /dns-query {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -246,26 +258,25 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
+
+    location / {
+        return 200 'Foreign DNS Relay Server is running';
+        add_header Content-Type text/plain;
+    }
 }
 EOF
 
     ln -sf /etc/nginx/sites-available/doh-server /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
     
-    echo "Testing Nginx configuration..."
-    if nginx -t; then
-        echo "Nginx configuration is valid!"
-        systemctl restart nginx
+    if nginx -t 2>&1 && systemctl restart nginx 2>&1; then
+        echo "✓ [6/8] Nginx configured and started"
     else
-        echo "ERROR: Nginx configuration test failed!"
+        echo "✗ [6/8] Nginx configuration failed"
         exit 1
     fi
     
-    echo ""
-    echo "======================================"
-    echo "Installing systemd service..."
-    echo "======================================"
-    
+    echo "[7/8] Installing and starting Foreign DNS service"
     cat > /etc/systemd/system/foreign-dns.service <<EOF
 [Unit]
 Description=Foreign DNS Relay Server
@@ -286,81 +297,45 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
     
-    systemctl daemon-reload
-    systemctl enable foreign-dns.service
-    systemctl start foreign-dns.service
+    systemctl daemon-reload 2>&1
+    systemctl enable foreign-dns.service 2>&1
+    systemctl start foreign-dns.service 2>&1
     
     sleep 3
     
-    echo ""
-    echo "=========================================="
-    echo "  Installation Complete!"
-    echo "=========================================="
-    echo ""
-    
     if systemctl is-active --quiet foreign-dns.service; then
-        echo "✓ Foreign DNS Server is running!"
-        echo ""
-        echo "Service Status:"
-        systemctl status foreign-dns.service --no-pager | head -n 10
+        echo "✓ [7/8] Foreign DNS service installed and started"
     else
-        echo "✗ Foreign DNS Server failed to start!"
-        echo ""
-        echo "Check logs with:"
-        echo "  journalctl -u foreign-dns -f"
+        echo "✗ [7/8] Foreign DNS service failed to start"
+        journalctl -u foreign-dns -n 20 --no-pager
         exit 1
     fi
     
-    echo ""
-    echo "======================================"
-    echo "Testing DoH Server..."
-    echo "======================================"
-    
+    echo "[8/8] Testing DoH server"
     sleep 2
-    
-    echo "Testing HTTPS DoH endpoint on port 4443..."
-    # Test DoH server by checking HTTP status code only
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-        -H "Content-Type: application/dns-message" \
+    test_result=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/dns-message" \
         --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d 2>/dev/null) \
         "https://$domain:4443/dns-query" 2>/dev/null || echo "000")
     
-    if [ "$http_code" = "200" ]; then
-        echo "✓ DoH server is working correctly!"
+    if [ "$test_result" = "200" ]; then
+        echo "✓ [8/8] DoH server test passed"
     else
-        echo "⚠ DoH server returned HTTP $http_code"
-        echo "Please check logs: journalctl -u foreign-dns -f"
+        echo "✗ [8/8] DoH server test returned HTTP $test_result"
     fi
     
     echo ""
-    echo "======================================"
-    echo "Configuration Summary:"
-    echo "======================================"
-    echo "Domain: $domain"
-    echo "Port: 4443 (DoH over HTTPS)"
-    echo "Upstream DNS: $upstream_doh"
-    echo ""
-    echo "Your DoH URL (use this in iran_config.json):"
-    echo "  https://$domain:4443/dns-query"
-    echo ""
-    echo "Test your DoH server:"
-    echo "  curl -H 'Content-Type: application/dns-message' \\"
-    echo "       --data-binary @<(echo -n 'AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB' | base64 -d) \\"
-    echo "       https://$domain:4443/dns-query"
-    echo ""
-    echo "View logs:"
-    echo "  journalctl -u foreign-dns -f"
-    echo ""
-    echo "Restart service:"
-    echo "  systemctl restart foreign-dns"
-    echo "=========================================="
+    echo "✓ Installation Complete!"
+    echo "DoH URL: https://$domain:4443/dns-query"
     
     echo ""
     read -p "Install Cloudflare WARP proxy support on port 50000? (y/n): " warp_choice
     if [[ "$warp_choice" =~ ^[Yy]$ ]]; then
-        install_warp
-    else
-        echo "Skipping Cloudflare WARP installation."
+        echo "[9/9] Installing Cloudflare WARP"
+        if install_warp; then
+            echo "✓ [9/9] WARP installed and configured"
+        else
+            echo "✗ [9/9] WARP installation failed"
+        fi
     fi
 }
 

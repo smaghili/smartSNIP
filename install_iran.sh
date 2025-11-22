@@ -19,25 +19,18 @@ detect_distribution() {
 
 install_dependencies() {
     detect_distribution
-    echo "Updating package list..."
-    $pm update -y
+    $pm update -y >/dev/null 2>&1
     
-    local packages=("nginx" "git" "jq" "certbot" "python3-certbot-nginx" "python3" "python3-pip" "curl" "gpg" "lsb-release")
+    local packages=("nginx" "git" "jq" "certbot" "python3-certbot-nginx" "python3" "python3-pip" "curl" "gpg" "lsb-release" "stunnel4")
     
     for package in "${packages[@]}"; do
         if ! dpkg -s "$package" &> /dev/null 2>&1 && ! rpm -q "$package" &> /dev/null 2>&1; then
-            echo "$package is not installed. Installing..."
-            $pm install -y "$package"
-        else
-            echo "$package is already installed."
+            $pm install -y "$package" >/dev/null 2>&1
         fi
     done
     
     if ! command -v python3 &> /dev/null; then
-        echo "python3 is not installed. Installing..."
-        $pm install -y python3 python3-pip
-    else
-        echo "python3 is already installed."
+        $pm install -y python3 python3-pip >/dev/null 2>&1
     fi
 }
 
@@ -47,20 +40,12 @@ install_iran_server() {
         exit 1
     fi
 
-    echo "=========================================="
-    echo "  Iran DNS Anti-Filter Server Installation"
-    echo "=========================================="
-    
     install_dependencies
     
     INSTALL_DIR="/root/smartDNS"
     mkdir -p "$INSTALL_DIR"
     
-    echo ""
-    echo "======================================"
-    echo "Configuration"
-    echo "======================================"
-    
+    echo "[1/8] Configuration"
     read -p "Enter your domain name: " domain
     if [ -z "$domain" ]; then
         echo "ERROR: Domain cannot be empty!"
@@ -82,10 +67,78 @@ install_iran_server() {
     fi
     
     echo ""
-    read -p "Enter sanctioned domain names separated by commas (e.g., youtube.com,googlevideo.com): " site_list
+    echo "Extracting foreign server IP..."
+    foreign_domain=$(echo "$foreign_doh" | sed -E 's|https?://([^:/]+).*|\1|')
+    foreign_ip=$(getent hosts "$foreign_domain" 2>/dev/null | awk '{print $1}' | head -n1)
+    if [ -z "$foreign_ip" ]; then
+        foreign_ip=$(nslookup "$foreign_domain" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | awk '{print $2}' | head -n1)
+    fi
+    if [ -z "$foreign_ip" ]; then
+        foreign_ip=$(ping -c 1 -W 2 "$foreign_domain" 2>/dev/null | grep "PING" | sed -E 's/.*\(([0-9.]+)\).*/\1/')
+    fi
+    if [ -z "$foreign_ip" ]; then
+        echo "Could not extract IP automatically."
+        read -p "Enter foreign server IP manually: " foreign_ip
+    else
+        read -p "Extracted foreign IP: $foreign_ip (Press Enter to confirm or type a different IP): " user_ip
+        if [ ! -z "$user_ip" ]; then
+            foreign_ip="$user_ip"
+        fi
+    fi
+    
+    if [ -z "$foreign_ip" ]; then
+        echo "ERROR: Foreign IP cannot be empty!"
+        exit 1
+    fi
     
     echo ""
-    echo "Creating configuration file..."
+    read -p "Enter sanctioned domain names separated by commas (e.g., youtube.com,googlevideo.com): " site_list
+    echo "✓ [1/8] Configuration completed"
+    
+    echo "[2/8] Installing and configuring Stunnel (Client mode)"
+    
+    systemctl stop stunnel4 2>/dev/null || true
+    systemctl disable stunnel4 2>/dev/null || true
+    rm -f /etc/stunnel/*.conf 2>/dev/null || true
+    
+    sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4 2>/dev/null || true
+    
+    if ! openssl req -new -x509 -days 3650 -nodes \
+        -out /etc/stunnel/stunnel.pem \
+        -keyout /etc/stunnel/stunnel.pem \
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" 2>/dev/null; then
+        echo "✗ [2/8] Failed to create Stunnel certificate"
+        exit 1
+    fi
+    
+    if ! cat > /etc/stunnel/tunnel-client.conf 2>/dev/null <<EOF
+client = yes
+foreground = no
+output = /var/log/stunnel-client.log
+pid = /run/stunnel4-client.pid
+sslVersion = TLSv1.3
+options = NO_RENEGOTIATION
+
+[foreign-tunnel]
+accept = 127.0.0.1:60000
+connect = $foreign_ip:6001
+verify = 0
+EOF
+    then
+        echo "✗ [2/8] Failed to create Stunnel config (disk full?)"
+        df -h /etc
+        exit 1
+    fi
+    
+    if systemctl restart stunnel4 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4; then
+        echo "✓ [2/8] Stunnel configured (127.0.0.1:60000 → $foreign_ip:6001)"
+    else
+        echo "✗ [2/8] Stunnel failed to start"
+        systemctl status stunnel4 --no-pager
+        exit 1
+    fi
+    
+    echo "[3/8] Creating configuration and downloading server code"
     cat > "$INSTALL_DIR/iran_config.json" <<EOF
 {
   "host": "$domain",
@@ -102,9 +155,9 @@ EOF
             counter=$((counter + 1))
             site=$(echo "$site" | xargs)
             if [ $counter -eq $site_count ]; then
-                echo "    \"$site\": \"$myip\"" >> "$INSTALL_DIR/iran_config.json"
+                echo "    \"$site\": \"$foreign_ip\"" >> "$INSTALL_DIR/iran_config.json"
             else
-                echo "    \"$site\": \"$myip\"," >> "$INSTALL_DIR/iran_config.json"
+                echo "    \"$site\": \"$foreign_ip\"," >> "$INSTALL_DIR/iran_config.json"
             fi
         done
     fi
@@ -114,12 +167,7 @@ EOF
 }
 EOF
     
-    echo "Configuration created:"
-    cat "$INSTALL_DIR/iran_config.json"
-    echo ""
-    
-    echo "Downloading iran_server.py from GitHub..."
-    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/iran_server.py -o "$INSTALL_DIR/iran_server.py"
+    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/iran_server.py -o "$INSTALL_DIR/iran_server.py" 2>/dev/null
     
     if [ ! -f "$INSTALL_DIR/iran_server.py" ]; then
         echo "ERROR: Failed to download iran_server.py"
@@ -127,36 +175,30 @@ EOF
     fi
     
     chmod +x "$INSTALL_DIR/iran_server.py"
-    echo "iran_server.py downloaded successfully!"
+    echo "✓ [3/8] Configuration created and server code downloaded"
     
-    echo "Installing Python dependencies..."
+    echo "[4/8] Installing Python dependencies"
     cd "$INSTALL_DIR"
-    pip3 install --break-system-packages aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || \
-    pip3 install --user aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || \
-    pip3 install aiohttp aiohttp-socks python-socks dnspython
+    if pip3 install --break-system-packages aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || \
+       pip3 install --user aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || \
+       pip3 install aiohttp aiohttp-socks python-socks dnspython 2>&1; then
+        echo "✓ [4/8] Python dependencies installed"
+    else
+        echo "✗ [4/8] Failed to install Python dependencies"
+        exit 1
+    fi
     
-    echo ""
-    echo "======================================"
-    echo "Obtaining SSL certificate..."
-    echo "======================================"
-    
-    # First get SSL certificate using standalone mode
+    echo "[5/8] Obtaining SSL certificate"
     systemctl stop nginx 2>/dev/null || true
-    certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to obtain SSL certificate!"
+    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email 2>&1; then
+        echo "✓ [5/8] SSL certificate obtained"
+    else
+        echo "✗ [5/8] Failed to obtain SSL certificate"
         echo "Make sure DNS points to this server and port 80 is open."
         exit 1
     fi
     
-    echo "SSL certificate obtained successfully!"
-    
-    echo ""
-    echo "======================================"
-    echo "Configuring Nginx with SSL..."
-    echo "======================================"
-    
+    echo "[6/8] Configuring Nginx"
     nginx_conf="/etc/nginx/sites-enabled/default"
     
     cat > "$nginx_conf" <<EOF
@@ -200,20 +242,14 @@ server {
 }
 EOF
     
-    echo "Testing Nginx configuration..."
-    if nginx -t; then
-        echo "Nginx configuration is valid!"
-        systemctl restart nginx
+    if nginx -t 2>&1 && systemctl restart nginx 2>&1; then
+        echo "✓ [6/8] Nginx configured and started"
     else
-        echo "ERROR: Nginx configuration test failed!"
+        echo "✗ [6/8] Nginx configuration failed"
         exit 1
     fi
     
-    echo ""
-    echo "======================================"
-    echo "Installing systemd service..."
-    echo "======================================"
-    
+    echo "[7/8] Installing and starting Iran DNS service"
     cat > /etc/systemd/system/iran-dns.service <<EOF
 [Unit]
 Description=Iran DNS Anti-Filter and SNI Proxy Server
@@ -234,54 +270,35 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
     
-    systemctl daemon-reload
-    systemctl enable iran-dns.service
-    systemctl start iran-dns.service
+    systemctl daemon-reload 2>&1
+    systemctl enable iran-dns.service 2>&1
+    systemctl start iran-dns.service 2>&1
     
     sleep 3
     
-    echo ""
-    echo "=========================================="
-    echo "  Installation Complete!"
-    echo "=========================================="
-    echo ""
-    
     if systemctl is-active --quiet iran-dns.service; then
-        echo "✓ Iran DNS Server is running!"
-        echo ""
-        echo "Service Status:"
-        systemctl status iran-dns.service --no-pager | head -n 10
+        echo "✓ [7/8] Iran DNS service installed and started"
     else
-        echo "✗ Iran DNS Server failed to start!"
-        echo ""
-        echo "Check logs with:"
-        echo "  journalctl -u iran-dns -f"
+        echo "✗ [7/8] Iran DNS service failed to start"
+        journalctl -u iran-dns -n 20 --no-pager
         exit 1
     fi
     
+    echo "[8/8] Testing DoH server"
+    sleep 2
+    test_result=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/dns-message" \
+        --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d 2>/dev/null) \
+        "https://$domain/dns-query" 2>/dev/null || echo "000")
+    
+    if [ "$test_result" = "200" ]; then
+        echo "✓ [8/8] DoH server test passed"
+    else
+        echo "✗ [8/8] DoH server test returned HTTP $test_result"
+    fi
+    
     echo ""
-    echo "======================================"
-    echo "Configuration Summary:"
-    echo "======================================"
-    echo "Domain: $domain"
-    echo "Server IP: $myip"
-    echo "Foreign DoH: $foreign_doh"
-    echo ""
-    echo "Services:"
-    echo "  - DoH Server: http://$myip:8080/dns-query"
-    echo "  - DoT Server: $domain:853"
-    echo "  - SNI Proxy: $myip:443"
-    echo ""
-    echo "Client Configuration:"
-    echo "  DoH URL: https://$domain/dns-query (if Nginx configured)"
-    echo "  DoT: $domain (port 853)"
-    echo ""
-    echo "View logs:"
-    echo "  journalctl -u iran-dns -f"
-    echo ""
-    echo "Restart service:"
-    echo "  systemctl restart iran-dns"
-    echo "=========================================="
+    echo "✓ Installation Complete!"
+    echo "DoH URL: https://$domain/dns-query"
 }
 
 install_iran_server
