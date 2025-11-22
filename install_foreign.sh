@@ -2,8 +2,6 @@
 
 ##############################################################
 #       SmartDNS Foreign Server Installer - Final Version
-#       Ultra-Stable, Full UI, Full Logging, No Goto Bugs
-#       No Feature Removed from Original
 ##############################################################
 
 GREEN="\e[32m"
@@ -19,7 +17,7 @@ last_error=""
 steps_total=8
 
 ##############################################################
-#   ERROR HANDLER  (Defined First – No Goto Issues)
+#   ERROR HANDLER
 ##############################################################
 fail() {
     tput cup 25 0
