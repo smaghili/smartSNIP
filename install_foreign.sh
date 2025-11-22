@@ -135,23 +135,12 @@ install_foreign_server() {
     esac
     echo "✓ [1/8] Configuration completed"
     
-    echo "[2/8] Installing and configuring Stunnel (Server mode)"
-    
+    echo -n "[2/8] Installing and configuring Stunnel (Server mode)... "
     systemctl stop stunnel4 2>/dev/null || true
-    systemctl disable stunnel4 2>/dev/null || true
-    rm -f /etc/stunnel/*.conf 2>/dev/null || true
-    
+    rm -f /etc/stunnel/*.conf 2>/dev/null
     sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4 2>/dev/null || true
-    
-    if ! openssl req -new -x509 -days 3650 -nodes \
-        -out /etc/stunnel/stunnel.pem \
-        -keyout /etc/stunnel/stunnel.pem \
-        -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" 2>/dev/null; then
-        echo "✗ [2/8] Failed to create Stunnel certificate"
-        exit 1
-    fi
-    
-    if ! cat > /etc/stunnel/tunnel-server.conf 2>/dev/null <<EOF
+    openssl req -new -x509 -days 3650 -nodes -out /etc/stunnel/stunnel.pem -keyout /etc/stunnel/stunnel.pem -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" 2>/dev/null || { echo "✗"; exit 1; }
+    cat > /etc/stunnel/tunnel-server.conf <<EOF
 client = no
 foreground = no
 output = /var/log/stunnel-server.log
@@ -166,19 +155,7 @@ cert = /etc/stunnel/stunnel.pem
 key  = /etc/stunnel/stunnel.pem
 verify = 0
 EOF
-    then
-        echo "✗ [2/8] Failed to create Stunnel config (disk full?)"
-        df -h /etc
-        exit 1
-    fi
-    
-    if systemctl restart stunnel4 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4; then
-        echo "✓ [2/8] Stunnel configured (0.0.0.0:6001 → 127.0.0.1:443)"
-    else
-        echo "✗ [2/8] Stunnel failed to start"
-        systemctl status stunnel4 --no-pager
-        exit 1
-    fi
+    systemctl restart stunnel4 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4 && echo "✓" || { echo "✗"; systemctl status stunnel4 --no-pager; exit 1; }
     
     echo "[3/8] Creating configuration and downloading server code"
     cat > "$INSTALL_DIR/foreign_config.json" <<EOF
@@ -199,28 +176,15 @@ EOF
     chmod +x "$INSTALL_DIR/foreign_server.py"
     echo "✓ [3/8] Configuration created and server code downloaded"
     
-    echo "[4/8] Installing Python dependencies"
+    echo -n "[4/8] Installing Python dependencies... "
     cd "$INSTALL_DIR"
-    if pip3 install --break-system-packages aiohttp dnspython 2>/dev/null || \
-       pip3 install --user aiohttp dnspython 2>/dev/null || \
-       pip3 install aiohttp dnspython 2>&1; then
-        echo "✓ [4/8] Python dependencies installed"
-    else
-        echo "✗ [4/8] Failed to install Python dependencies"
-        exit 1
-    fi
+    pip3 install --break-system-packages aiohttp dnspython 2>/dev/null || pip3 install --user aiohttp dnspython 2>/dev/null || pip3 install aiohttp dnspython 2>&1 && echo "✓" || { echo "✗"; exit 1; }
     
-    echo "[5/8] Obtaining SSL certificate"
+    echo -n "[5/8] Obtaining SSL certificate... "
     systemctl stop nginx 2>/dev/null || true
-    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email 2>&1; then
-        echo "✓ [5/8] SSL certificate obtained"
-    else
-        echo "✗ [5/8] Failed to obtain SSL certificate"
-        echo "Make sure DNS points to this server and port 80 is open."
-        exit 1
-    fi
+    certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email 2>&1 && echo "✓" || { echo "✗"; exit 1; }
     
-    echo "[6/8] Configuring Nginx"
+    echo -n "[6/8] Configuring Nginx... "
     cat > /etc/nginx/sites-available/doh-server <<EOF
 server {
     if (\$host = $domain) {
@@ -268,15 +232,9 @@ EOF
 
     ln -sf /etc/nginx/sites-available/doh-server /etc/nginx/sites-enabled/
     rm -f /etc/nginx/sites-enabled/default
+    nginx -t 2>&1 && systemctl restart nginx 2>&1 && echo "✓" || { echo "✗"; exit 1; }
     
-    if nginx -t 2>&1 && systemctl restart nginx 2>&1; then
-        echo "✓ [6/8] Nginx configured and started"
-    else
-        echo "✗ [6/8] Nginx configuration failed"
-        exit 1
-    fi
-    
-    echo "[7/8] Installing and starting Foreign DNS service"
+    echo -n "[7/8] Installing and starting Foreign DNS service... "
     cat > /etc/systemd/system/foreign-dns.service <<EOF
 [Unit]
 Description=Foreign DNS Relay Server
@@ -300,28 +258,13 @@ EOF
     systemctl daemon-reload 2>&1
     systemctl enable foreign-dns.service 2>&1
     systemctl start foreign-dns.service 2>&1
-    
     sleep 3
+    systemctl is-active --quiet foreign-dns.service && echo "✓" || { echo "✗"; journalctl -u foreign-dns -n 20 --no-pager; exit 1; }
     
-    if systemctl is-active --quiet foreign-dns.service; then
-        echo "✓ [7/8] Foreign DNS service installed and started"
-    else
-        echo "✗ [7/8] Foreign DNS service failed to start"
-        journalctl -u foreign-dns -n 20 --no-pager
-        exit 1
-    fi
-    
-    echo "[8/8] Testing DoH server"
+    echo -n "[8/8] Testing DoH server... "
     sleep 2
-    test_result=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/dns-message" \
-        --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d 2>/dev/null) \
-        "https://$domain:4443/dns-query" 2>/dev/null || echo "000")
-    
-    if [ "$test_result" = "200" ]; then
-        echo "✓ [8/8] DoH server test passed"
-    else
-        echo "✗ [8/8] DoH server test returned HTTP $test_result"
-    fi
+    test_result=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/dns-message" --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d 2>/dev/null) "https://$domain:4443/dns-query" 2>/dev/null || echo "000")
+    [ "$test_result" = "200" ] && echo "✓" || echo "✗ (HTTP $test_result)"
     
     echo ""
     echo "✓ Installation Complete!"
@@ -330,12 +273,8 @@ EOF
     echo ""
     read -p "Install Cloudflare WARP proxy support on port 50000? (y/n): " warp_choice
     if [[ "$warp_choice" =~ ^[Yy]$ ]]; then
-        echo "[9/9] Installing Cloudflare WARP"
-        if install_warp; then
-            echo "✓ [9/9] WARP installed and configured"
-        else
-            echo "✗ [9/9] WARP installation failed"
-        fi
+        echo -n "[9/9] Installing Cloudflare WARP... "
+        install_warp && echo "✓" || echo "✗"
     fi
 }
 
