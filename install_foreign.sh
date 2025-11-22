@@ -136,14 +136,22 @@ install_foreign_server() {
     echo "✓ [1/8] Configuration completed"
     
     echo "[2/8] Installing and configuring Stunnel (Server mode)"
+    
+    systemctl stop stunnel4 2>/dev/null || true
+    systemctl disable stunnel4 2>/dev/null || true
+    rm -f /etc/stunnel/*.conf 2>/dev/null || true
+    
     sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4 2>/dev/null || true
     
-    openssl req -new -x509 -days 3650 -nodes \
+    if ! openssl req -new -x509 -days 3650 -nodes \
         -out /etc/stunnel/stunnel.pem \
         -keyout /etc/stunnel/stunnel.pem \
-        -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" >/dev/null 2>&1
+        -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" 2>/dev/null; then
+        echo "✗ [2/8] Failed to create Stunnel certificate"
+        exit 1
+    fi
     
-    cat > /etc/stunnel/tunnel-server.conf <<EOF
+    if ! cat > /etc/stunnel/tunnel-server.conf 2>/dev/null <<EOF
 client = no
 foreground = no
 output = /var/log/stunnel-server.log
@@ -158,8 +166,13 @@ cert = /etc/stunnel/stunnel.pem
 key  = /etc/stunnel/stunnel.pem
 verify = 0
 EOF
+    then
+        echo "✗ [2/8] Failed to create Stunnel config (disk full?)"
+        df -h /etc
+        exit 1
+    fi
     
-    if systemctl restart stunnel4 >/dev/null 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4; then
+    if systemctl restart stunnel4 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4; then
         echo "✓ [2/8] Stunnel configured (0.0.0.0:6001 → 127.0.0.1:443)"
     else
         echo "✗ [2/8] Stunnel failed to start"
