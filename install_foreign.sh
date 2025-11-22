@@ -20,7 +20,7 @@ steps_total=8
 #   ERROR HANDLER
 ##############################################################
 fail() {
-    tput cup 25 0
+    tput cup $((steps_total + 4)) 0
     echo -e "${RED}Installation failed.${RESET}"
     echo ""
     echo "Error details:"
@@ -144,7 +144,7 @@ draw_steps() {
 
 update_step() {
     tput cup $(( $1 + 2 )) 0
-    printf "[%d/%d] %-60s %s\n" "$(($1+1))" "$steps_total" "${step_titles_base[$1]}" "$2"
+    printf "[%d/%d] %-60s %b\n" "$(($1+1))" "$steps_total" "${step_titles_base[$1]}" "$2"
 }
 
 ##############################################################
@@ -433,7 +433,7 @@ fi
 ##############################
 # SUCCESS END
 ##############################
-tput cup 27 0
+tput cup $((steps_total + 4)) 0
 echo -e "${GREEN}✓ Installation Complete!${RESET}"
 echo "DoH URL: https://$domain:4443/dns-query"
 
