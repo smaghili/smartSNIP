@@ -95,14 +95,11 @@ install_iran_server() {
     read -p "Enter sanctioned domain names separated by commas (e.g., youtube.com,googlevideo.com): " site_list
     echo "✓ [1/8] Configuration completed"
     
-    echo "[2/8] Installing and configuring Stunnel (Client mode)"
+    echo -n "[2/8] Installing and configuring Stunnel (Client mode)... "
+    systemctl stop stunnel4 2>/dev/null || true
+    rm -f /etc/stunnel/*.conf 2>/dev/null
     sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4 2>/dev/null || true
-    
-    openssl req -new -x509 -days 3650 -nodes \
-        -out /etc/stunnel/stunnel.pem \
-        -keyout /etc/stunnel/stunnel.pem \
-        -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" >/dev/null 2>&1
-    
+    openssl req -new -x509 -days 3650 -nodes -out /etc/stunnel/stunnel.pem -keyout /etc/stunnel/stunnel.pem -subj "/C=US/ST=State/L=City/O=Organization/CN=stunnel" 2>/dev/null || { echo "✗"; exit 1; }
     cat > /etc/stunnel/tunnel-client.conf <<EOF
 client = yes
 foreground = no
@@ -116,14 +113,7 @@ accept = 127.0.0.1:60000
 connect = $foreign_ip:6001
 verify = 0
 EOF
-    
-    if systemctl restart stunnel4 >/dev/null 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4; then
-        echo "✓ [2/8] Stunnel configured (127.0.0.1:60000 → $foreign_ip:6001)"
-    else
-        echo "✗ [2/8] Stunnel failed to start"
-        systemctl status stunnel4 --no-pager
-        exit 1
-    fi
+    systemctl restart stunnel4 2>&1 && sleep 2 && systemctl is-active --quiet stunnel4 && echo "✓" || { echo "✗"; systemctl status stunnel4 --no-pager; exit 1; }
     
     echo "[3/8] Creating configuration and downloading server code"
     cat > "$INSTALL_DIR/iran_config.json" <<EOF
@@ -164,28 +154,15 @@ EOF
     chmod +x "$INSTALL_DIR/iran_server.py"
     echo "✓ [3/8] Configuration created and server code downloaded"
     
-    echo "[4/8] Installing Python dependencies"
+    echo -n "[4/8] Installing Python dependencies... "
     cd "$INSTALL_DIR"
-    if pip3 install --break-system-packages aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || \
-       pip3 install --user aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || \
-       pip3 install aiohttp aiohttp-socks python-socks dnspython 2>&1; then
-        echo "✓ [4/8] Python dependencies installed"
-    else
-        echo "✗ [4/8] Failed to install Python dependencies"
-        exit 1
-    fi
+    pip3 install --break-system-packages aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || pip3 install --user aiohttp aiohttp-socks python-socks dnspython 2>/dev/null || pip3 install aiohttp aiohttp-socks python-socks dnspython 2>&1 && echo "✓" || { echo "✗"; exit 1; }
     
-    echo "[5/8] Obtaining SSL certificate"
+    echo -n "[5/8] Obtaining SSL certificate... "
     systemctl stop nginx 2>/dev/null || true
-    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email 2>&1; then
-        echo "✓ [5/8] SSL certificate obtained"
-    else
-        echo "✗ [5/8] Failed to obtain SSL certificate"
-        echo "Make sure DNS points to this server and port 80 is open."
-        exit 1
-    fi
+    certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email 2>&1 && echo "✓" || { echo "✗"; exit 1; }
     
-    echo "[6/8] Configuring Nginx"
+    echo -n "[6/8] Configuring Nginx... "
     nginx_conf="/etc/nginx/sites-enabled/default"
     
     cat > "$nginx_conf" <<EOF
@@ -229,14 +206,9 @@ server {
 }
 EOF
     
-    if nginx -t 2>&1 && systemctl restart nginx 2>&1; then
-        echo "✓ [6/8] Nginx configured and started"
-    else
-        echo "✗ [6/8] Nginx configuration failed"
-        exit 1
-    fi
+    nginx -t 2>&1 && systemctl restart nginx 2>&1 && echo "✓" || { echo "✗"; exit 1; }
     
-    echo "[7/8] Installing and starting Iran DNS service"
+    echo -n "[7/8] Installing and starting Iran DNS service... "
     cat > /etc/systemd/system/iran-dns.service <<EOF
 [Unit]
 Description=Iran DNS Anti-Filter and SNI Proxy Server
@@ -260,28 +232,13 @@ EOF
     systemctl daemon-reload 2>&1
     systemctl enable iran-dns.service 2>&1
     systemctl start iran-dns.service 2>&1
-    
     sleep 3
+    systemctl is-active --quiet iran-dns.service && echo "✓" || { echo "✗"; journalctl -u iran-dns -n 20 --no-pager; exit 1; }
     
-    if systemctl is-active --quiet iran-dns.service; then
-        echo "✓ [7/8] Iran DNS service installed and started"
-    else
-        echo "✗ [7/8] Iran DNS service failed to start"
-        journalctl -u iran-dns -n 20 --no-pager
-        exit 1
-    fi
-    
-    echo "[8/8] Testing DoH server"
+    echo -n "[8/8] Testing DoH server... "
     sleep 2
-    test_result=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/dns-message" \
-        --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d 2>/dev/null) \
-        "https://$domain/dns-query" 2>/dev/null || echo "000")
-    
-    if [ "$test_result" = "200" ]; then
-        echo "✓ [8/8] DoH server test passed"
-    else
-        echo "✗ [8/8] DoH server test returned HTTP $test_result"
-    fi
+    test_result=$(curl -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/dns-message" --data-binary @<(echo -n "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB" | base64 -d 2>/dev/null) "https://$domain/dns-query" 2>/dev/null || echo "000")
+    [ "$test_result" = "200" ] && echo "✓" || echo "✗ (HTTP $test_result)"
     
     echo ""
     echo "✓ Installation Complete!"
