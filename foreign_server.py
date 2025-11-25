@@ -49,14 +49,9 @@ def matches_domain_key(domain: str, key: str) -> bool:
     domain_clean = domain.rstrip(".").lower()
     key_lower = key.lower()
     
-    if "." in key_lower:
-        if domain_clean == key_lower:
-            return True
-        if domain_clean.endswith("." + key_lower):
-            return True
-        return False
-    
-    if key_lower in domain_clean:
+    if domain_clean == key_lower:
+        return True
+    if domain_clean.endswith("." + key_lower):
         return True
     
     return False
