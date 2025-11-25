@@ -82,20 +82,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/inst
 {
   "host": "your-iran-domain.com",
   "server_ip": "IRAN_SERVER_IP",
-  "foreign_doh_url": "https://your-foreign-domain.com/dns-query",
+  "foreign_doh_url": "https://your-foreign-domain.com:4443/dns-query",
   "domains": {
-    "youtube": "FOREIGN_SERVER_IP",
-    "googlevideo": "FOREIGN_SERVER_IP",
-    "android": "FOREIGN_SERVER_IP",
-    "twitter": "warp",
-    "instagram": "warp"
+    "google": "FOREIGN_SERVER_IP",
+    "filter.txt": "FOREIGN_SERVER_IP",
+    "ban.txt": "FOREIGN_SERVER_IP",
+    "warp.txt": "FOREIGN_SERVER_IP"
   }
 }
 ```
 
 **توضیحات:**
-- **IP سرور خارج**: ترافیک از سرور خارج شما عبور می‌کند
-- **`"warp"`**: ترافیک از پروکسی Cloudflare WARP عبور می‌کند
+- **IP سرور خارج**: ترافیک از سرور خارج شما عبور می‌کند (`FOREIGN_SERVER_IP` را با IP واقعی جایگزین کنید)
+- **فایل‌های دامنه**: می‌توانید دامنه‌های دلخواه خود را در فایل‌های `filter.txt`، `ban.txt` و `warp.txt` اضافه کنید
 - **مچینگ نرم**: کافی است بخشی از دامنه را بنویسید (مثلاً `youtube` برای همه زیردامنه‌های یوتیوب)
 
 ## پورت‌های سرویس
