@@ -4,6 +4,7 @@ import base64
 import gc
 import json
 import logging
+import os
 import struct
 import time
 from collections import defaultdict
@@ -26,7 +27,7 @@ from dns.rrset import from_text
 gc.set_threshold(700, 10, 5)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -46,23 +47,116 @@ def now_ts() -> float:
     return time.time()
 
 
+def matches_domain_key(domain: str, key: str) -> bool:
+    domain_clean = domain.rstrip(".").lower()
+    key_lower = key.lower()
+    
+    if "." in key_lower:
+        if domain_clean == key_lower:
+            return True
+        if domain_clean.endswith("." + key_lower):
+            return True
+        return False
+    
+    if key_lower in domain_clean:
+        return True
+    
+    return False
+
+
+def is_ip_address(val: str) -> bool:
+    try:
+        ipaddress.ip_address(val)
+        return True
+    except Exception:
+        return False
+
+
+def resolve_route(target_host: str, matched_value: str, server_ip: str) -> Tuple[str, int]:
+    if matched_value == "direct":
+        return target_host, 443
+    elif is_ip_address(matched_value):
+        return "127.0.0.1", 60000
+    elif ":" in matched_value:
+        parts = matched_value.split(":")
+        return parts[0], int(parts[1])
+    else:
+        return target_host, 443
+
+
+def should_fake_sni(target_host: str, config_host: str, domains: Dict[str, str]) -> bool:
+    if target_host == config_host:
+        return False
+    return any(matches_domain_key(target_host, key) for key in domains.keys())
+
+
+def find_matching_domain(domain: str, domains: Dict[str, str]) -> Optional[str]:
+    domain_clean = domain.rstrip(".").lower()
+    for key, val in domains.items():
+        if matches_domain_key(domain_clean, key):
+            if ":" in val:
+                return val.split(":")[0]
+            return val
+    return None
+
+
 class Config:
     def __init__(self, host: str, server_ip: str, foreign_doh_url: str, domains: Dict[str, str]):
         self.host = host
         self.server_ip = server_ip
         self.foreign_doh_url = foreign_doh_url
-        self.domains = domains
+        self._config_dir = os.getcwd()
+        self.domains = self._expand_domains(domains)
 
     @staticmethod
     def load_config(filename: str = "iran_config.json") -> "Config":
-        with open(filename, "r") as f:
+        config_path = os.path.abspath(filename)
+        config_dir = os.path.dirname(config_path)
+
+        with open(config_path, "r") as f:
             data = json.load(f)
-        return Config(
+
+        cfg = Config(
             host=data["host"],
             server_ip=data["server_ip"],
             foreign_doh_url=data["foreign_doh_url"],
-            domains=data.get("domains", {}),
+            domains=data.get("domains", {})
         )
+
+        cfg._config_dir = config_dir
+        cfg.domains = cfg._expand_domains(cfg.domains)
+
+        return cfg
+
+    def _expand_domains(self, domains: Dict[str, str]) -> Dict[str, str]:
+        final_map = {}
+
+        for key, value in domains.items():
+            if key.endswith(".txt"):
+                file_path = key
+
+                if not os.path.isabs(file_path):
+                    file_path = os.path.join(self._config_dir, file_path)
+
+                if os.path.isfile(file_path):
+                    try:
+                        loaded_count = 0
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            for line in f:
+                                domain = line.strip()
+                                if domain and not domain.startswith("#"):
+                                    final_map[domain.lower()] = value
+                                    loaded_count += 1
+                        logger.info(f"Config: loaded {loaded_count} domains from {file_path}")
+                    except Exception as e:
+                        logger.error(f"Config: failed to load domains from {file_path}: {e}")
+                else:
+                    logger.warning(f"Config: domain file not found: {file_path}")
+
+            else:
+                final_map[key.lower()] = value
+
+        return final_map
 
 
 class BufferPool:
@@ -112,23 +206,6 @@ class DNSHandler:
         self.session = session
         self.doh_semaphore = doh_semaphore
 
-    def _is_ip(self, val: str) -> bool:
-        try:
-            ipaddress.ip_address(val)
-            return True
-        except Exception:
-            return False
-
-    def _resolve_domain_mode(self, domain: str) -> Optional[str]:
-        domain_clean = domain.rstrip(".").lower()
-        for key, val in self.config.domains.items():
-            key_lower = key.lower()
-            if domain_clean == key_lower or domain_clean.endswith("." + key_lower) or key_lower in domain_clean:
-                if ":" in val:
-                    return val.split(":")[0]
-                return val
-        return None
-
     async def process_dns_query(self, query_bytes: bytes) -> bytes:
         try:
             dns_message = message.from_wire(query_bytes)
@@ -141,12 +218,12 @@ class DNSHandler:
         question = dns_message.question[0]
         domain = question.name.to_text()
         qtype = question.rdtype
-        mode = self._resolve_domain_mode(domain)
+        mode = find_matching_domain(domain, self.config.domains)
 
         logger.info(f"DNSHandler: received query for domain={domain} qtype={qtype} mode={mode}")
 
         if mode:
-            if self._is_ip(mode):
+            if is_ip_address(mode):
                 fake_ip = self.config.server_ip
                 try:
                     logger.info(f"DNSHandler: domain={domain} rewriting to server_ip={fake_ip} (anti-sanction, will route to {mode})")
@@ -283,13 +360,6 @@ class SNIProxy:
         self.watchdog_task: Optional[asyncio.Task] = None
         self.running = False
 
-    def _is_ip(self, val: str) -> bool:
-        try:
-            ipaddress.ip_address(val)
-            return True
-        except Exception:
-            return False
-
     def _get_host_pool(self, host: str) -> HostPool:
         if host not in self.host_pools:
             self.host_pools[host] = HostPool(host)
@@ -342,6 +412,107 @@ class SNIProxy:
             return None
         except Exception:
             return None
+
+    def _force_replace_sni_in_client_hello(self, data: bytes, fake_sni: str, original_sni: str) -> bytes:
+        """
+        Rebuild ClientHello with fake SNI for DPI bypass.
+        Adds custom extension (type 65001) containing original SNI.
+        """
+        try:
+            if len(data) < 43 or data[0] != 0x16:
+                return data
+
+            content_type = data[0]
+            version = data[1:3]
+            record_length = struct.unpack("!H", data[3:5])[0]
+
+            handshake_type = data[5]
+            handshake_len = int.from_bytes(data[6:9], "big")
+
+            pos = 9
+
+            client_version = data[pos:pos+2]
+            pos += 2
+
+            random_bytes = data[pos:pos+32]
+            pos += 32
+
+            session_id_len = data[pos]
+            pos += 1
+            session_id = data[pos:pos+session_id_len]
+            pos += session_id_len
+
+            cipher_len = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2
+            cipher_suites = data[pos:pos+cipher_len]
+            pos += cipher_len
+
+            comp_len = data[pos]
+            pos += 1
+            compression = data[pos:pos+comp_len]
+            pos += comp_len
+
+            ext_total_len = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2
+            ext_end = pos + ext_total_len
+
+            new_ext = bytearray()
+            fake_sni_bytes = fake_sni.encode()
+            orig_bytes = original_sni.encode()
+
+            while pos < ext_end:
+                ext_type = struct.unpack("!H", data[pos:pos+2])[0]
+                ext_len = struct.unpack("!H", data[pos+2:pos+4])[0]
+
+                if ext_type == 0:
+                    sni = bytearray()
+                    sni.extend(struct.pack("!H", 0))
+                    server_name_list = 3 + len(fake_sni_bytes)
+                    sni.extend(struct.pack("!H", server_name_list + 2))
+                    sni.extend(struct.pack("!H", server_name_list))
+                    sni.append(0)
+                    sni.extend(struct.pack("!H", len(fake_sni_bytes)))
+                    sni.extend(fake_sni_bytes)
+
+                    new_ext.extend(sni)
+                else:
+                    new_ext.extend(data[pos:pos+4+ext_len])
+
+                pos += 4 + ext_len
+
+            custom = bytearray()
+            custom.extend(struct.pack("!H", 65001))
+            custom.extend(struct.pack("!H", len(orig_bytes)))
+            custom.extend(orig_bytes)
+            new_ext.extend(custom)
+
+            body = bytearray()
+            body.extend(client_version)
+            body.extend(random_bytes)
+            body.append(session_id_len)
+            body.extend(session_id)
+            body.extend(struct.pack("!H", cipher_len))
+            body.extend(cipher_suites)
+            body.append(comp_len)
+            body.extend(compression)
+            body.extend(struct.pack("!H", len(new_ext)))
+            body.extend(new_ext)
+
+            new_hs = bytearray()
+            new_hs.append(handshake_type)
+            new_hs.extend(len(body).to_bytes(3, "big"))
+            new_hs.extend(body)
+
+            out = bytearray()
+            out.append(content_type)
+            out.extend(version)
+            out.extend(struct.pack("!H", len(new_hs)))
+            out.extend(new_hs)
+
+            return bytes(out)
+
+        except Exception:
+            return data
 
     async def _peek_client_hello(self, reader: asyncio.StreamReader) -> Tuple[Optional[str], bytes]:
         try:
@@ -411,43 +582,29 @@ class SNIProxy:
                 logger.debug("SNIProxy: empty or missing SNI, closing (likely client cancelled)")
                 return
 
-            target_host = server_name.lower().rstrip(".")
+            original_server_name = server_name
+            target_host = original_server_name.lower().rstrip(".")
+            
+            if should_fake_sni(target_host, self.config.host, self.config.domains):
+                FAKE_SNI = "google.com"
+                peeked_bytes = self._force_replace_sni_in_client_hello(peeked_bytes, FAKE_SNI, original_server_name)
+                logger.info("SNIProxy: forced SNI replacement: %s -> %s (original stored in extension 65001)", original_server_name, FAKE_SNI)
+            else:
+                logger.debug("SNIProxy: keeping original SNI: %s", original_server_name)
+            
             if target_host == self.config.host:
                 target_address = "127.0.0.1"
                 target_port = 8443
                 logger.debug("SNIProxy: routing internal host %s -> 127.0.0.1:8443", target_host)
             else:
-                target_address = target_host
-                target_port = 443
-                matched_domain = None
+                matched_domain = find_matching_domain(target_host, self.config.domains)
                 
-                for key, val in self.config.domains.items():
-                    key_lower = key.lower()
-                    
-                    if key_lower in target_host:
-                        matched_domain = val
-                        
-                        # حالت direct → مستقیم به مقصد اصلی
-                        if val == "direct":
-                            target_address = target_host
-                            target_port = 443
-                        
-                        # حالت IP → یعنی باید از DEFAULT SSH TUNNEL رد شود
-                        elif self._is_ip(val):
-                            target_address = "127.0.0.1"    # tunel
-                            target_port = 60000            # tunel port
-                        
-                        # حالت host:port معمولی
-                        elif ":" in val:
-                            parts = val.split(":")
-                            target_address = parts[0]
-                            target_port = int(parts[1])
-                        
-                        break
-                
-                if matched_domain and (":" in matched_domain or self._is_ip(matched_domain)):
-                    logger.info("SNIProxy: host=%s, matched_domain=%s, routing to foreign server %s:%d", target_host, matched_domain, target_address, target_port)
+                if matched_domain:
+                    target_address, target_port = resolve_route(target_host, matched_domain, self.config.server_ip)
+                    logger.info("SNIProxy: host=%s, matched_domain=%s, routing to %s:%d", target_host, matched_domain, target_address, target_port)
                 else:
+                    target_address = target_host
+                    target_port = 443
                     logger.info("SNIProxy: host=%s, routing directly to %s:%d", target_host, target_address, target_port)
 
             host_pool = self._get_host_pool(target_host)

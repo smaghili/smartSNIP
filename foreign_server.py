@@ -4,6 +4,7 @@ import base64
 import gc
 import json
 import logging
+import os
 import time
 import struct
 import socket
@@ -44,21 +45,71 @@ def now_ts() -> float:
     return time.time()
 
 
+def matches_domain_key(domain: str, key: str) -> bool:
+    domain_clean = domain.rstrip(".").lower()
+    key_lower = key.lower()
+    
+    if "." in key_lower:
+        if domain_clean == key_lower:
+            return True
+        if domain_clean.endswith("." + key_lower):
+            return True
+        return False
+    
+    if key_lower in domain_clean:
+        return True
+    
+    return False
+
+
 class Config:
     def __init__(self, upstream_doh: str, port: int, domains: Dict[str, str]):
         self.upstream_doh = upstream_doh
         self.port = port
-        self.domains = domains
+        self._config_dir = "/root/smartDNS"
+        self.domains = self._expand_domains(domains)
 
     @staticmethod
     def load_config(filename: str = "foreign_config.json") -> "Config":
         with open(filename, "r") as f:
             data = json.load(f)
-        return Config(
+
+        cfg = Config(
             upstream_doh=data.get("upstream_doh", DEFAULT_UPSTREAM),
             port=data.get("port", 8080),
-            domains=data.get("domains", {}),
+            domains=data.get("domains", {})
         )
+        return cfg
+
+    def _expand_domains(self, domains: Dict[str, str]) -> Dict[str, str]:
+        final_map = {}
+
+        for key, value in domains.items():
+            if key.endswith(".txt"):
+                file_path = key
+
+                if not os.path.isabs(file_path):
+                    file_path = os.path.join(self._config_dir, file_path)
+
+                if os.path.isfile(file_path):
+                    try:
+                        loaded_count = 0
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            for line in f:
+                                domain = line.strip()
+                                if domain and not domain.startswith("#"):
+                                    final_map[domain.lower()] = value
+                                    loaded_count += 1
+                        logger.info(f"Foreign Config: loaded {loaded_count} domains from {file_path}")
+                    except Exception as e:
+                        logger.error(f"Foreign Config: failed to load domains from {file_path}: {e}")
+                else:
+                    logger.warning(f"Foreign Config: domain file not found: {file_path}")
+
+            else:
+                final_map[key.lower()] = value
+
+        return final_map
 
 
 class BufferPool:
@@ -307,6 +358,9 @@ class SimpleSNIProxy:
         return self.host_pools[host]
 
     def _read_client_hello(self, data: bytes) -> Optional[str]:
+        """
+        Extract SNI from ClientHello.
+        """
         try:
             if len(data) < 43 or data[0] != 0x16:
                 return None
@@ -350,6 +404,142 @@ class SimpleSNIProxy:
             return None
         except Exception:
             return None
+    
+    def _extract_original_sni_from_extension(self, data: bytes) -> Optional[str]:
+        """
+        Extract original SNI from custom extension type 65001.
+        """
+        try:
+            if len(data) < 43 or data[0] != 0x16:
+                return None
+            
+            pos = 43
+            session_id_length = data[pos]
+            pos += 1 + session_id_length
+            
+            cipher_suites_length = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2 + cipher_suites_length
+            
+            compression_methods_length = data[pos]
+            pos += 1 + compression_methods_length
+            
+            extensions_length = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2
+            extensions_end = pos + extensions_length
+            
+            while pos + 4 <= extensions_end:
+                extension_type = struct.unpack("!H", data[pos:pos+2])[0]
+                extension_length = struct.unpack("!H", data[pos+2:pos+4])[0]
+                pos += 4
+                
+                if extension_type == 65001:
+                    if pos + extension_length <= len(data):
+                        original_sni = data[pos:pos+extension_length].decode('utf-8', errors='ignore')
+                        return original_sni
+                    return None
+                
+                pos += extension_length
+            
+            return None
+        except Exception:
+            return None
+    
+    def _restore_sni_in_client_hello(self, data: bytes, original_sni: str) -> bytes:
+        """
+        Rebuild ClientHello with original SNI restored.
+        Removes custom extension 65001.
+        """
+        try:
+            if len(data) < 43 or data[0] != 0x16:
+                return data
+
+            content_type = data[0]
+            version = data[1:3]
+            record_length = struct.unpack("!H", data[3:5])[0]
+
+            handshake_type = data[5]
+            handshake_len = int.from_bytes(data[6:9], "big")
+
+            pos = 9
+
+            client_version = data[pos:pos+2]
+            pos += 2
+
+            random_bytes = data[pos:pos+32]
+            pos += 32
+
+            session_id_len = data[pos]
+            pos += 1
+            session_id = data[pos:pos+session_id_len]
+            pos += session_id_len
+
+            cipher_len = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2
+            cipher_suites = data[pos:pos+cipher_len]
+            pos += cipher_len
+
+            comp_len = data[pos]
+            pos += 1
+            compression = data[pos:pos+comp_len]
+            pos += comp_len
+
+            ext_total_len = struct.unpack("!H", data[pos:pos+2])[0]
+            pos += 2
+            ext_end = pos + ext_total_len
+
+            new_ext = bytearray()
+            original_sni_bytes = original_sni.encode()
+
+            while pos < ext_end:
+                ext_type = struct.unpack("!H", data[pos:pos+2])[0]
+                ext_len = struct.unpack("!H", data[pos+2:pos+4])[0]
+
+                if ext_type == 0:
+                    sni = bytearray()
+                    sni.extend(struct.pack("!H", 0))
+                    sl = 3 + len(original_sni_bytes)
+                    sni.extend(struct.pack("!H", sl + 2))
+                    sni.extend(struct.pack("!H", sl))
+                    sni.append(0)
+                    sni.extend(struct.pack("!H", len(original_sni_bytes)))
+                    sni.extend(original_sni_bytes)
+                    new_ext.extend(sni)
+
+                elif ext_type == 65001:
+                    pass
+
+                else:
+                    new_ext.extend(data[pos:pos+4+ext_len])
+
+                pos += 4 + ext_len
+
+            body = bytearray()
+            body.extend(client_version)
+            body.extend(random_bytes)
+            body.append(session_id_len)
+            body.extend(session_id)
+            body.extend(struct.pack("!H", cipher_len))
+            body.extend(cipher_suites)
+            body.append(comp_len)
+            body.extend(compression)
+            body.extend(struct.pack("!H", len(new_ext)))
+            body.extend(new_ext)
+
+            new_hs = bytearray()
+            new_hs.append(handshake_type)
+            new_hs.extend(len(body).to_bytes(3, "big"))
+            new_hs.extend(body)
+
+            out = bytearray()
+            out.append(content_type)
+            out.extend(version)
+            out.extend(struct.pack("!H", len(new_hs)))
+            out.extend(new_hs)
+
+            return bytes(out)
+
+        except Exception:
+            return data
 
     async def _peek_client_hello(self, reader: asyncio.StreamReader) -> Tuple[Optional[str], bytes]:
         try:
@@ -374,14 +564,7 @@ class SimpleSNIProxy:
     def _should_use_warp(self, domain: str) -> bool:
         domain_clean = domain.rstrip(".").lower()
         for key, val in self.config.domains.items():
-            if val != "warp":
-                continue
-            key_lower = key.lower()
-            if domain_clean == key_lower:
-                return True
-            if domain_clean.endswith("." + key_lower):
-                return True
-            if key_lower in domain_clean:
+            if val == "warp" and matches_domain_key(domain_clean, key):
                 return True
         return False
 
@@ -426,7 +609,17 @@ class SimpleSNIProxy:
                 logger.debug("SNIProxy: empty SNI")
                 return
 
-            target_host = server_name.lower().rstrip(".")
+            fake_sni = server_name.lower().rstrip(".")
+            
+            original_sni = self._extract_original_sni_from_extension(peeked_bytes)
+            if original_sni:
+                target_host = original_sni.lower().rstrip(".")
+                peeked_bytes = self._restore_sni_in_client_hello(peeked_bytes, original_sni)
+                logger.info(f"SNIProxy: restored original SNI: {fake_sni} -> {target_host}")
+            else:
+                target_host = fake_sni
+                logger.debug(f"SNIProxy: no custom extension found, using SNI as-is: {target_host}")
+            
             use_warp = self._should_use_warp(target_host)
             
             if use_warp:
@@ -556,4 +749,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Foreign Server stopped by user")
-

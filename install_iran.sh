@@ -145,20 +145,16 @@ EOF
   "server_ip": "$myip",
   "foreign_doh_url": "$foreign_doh",
   "domains": {
+    "filter.txt": "$foreign_ip",
+    "ban.txt": "$foreign_ip",
+    "warp.txt": "$foreign_ip"
 EOF
     
     if [ ! -z "$site_list" ]; then
         IFS=',' read -ra sites <<< "$site_list"
-        site_count=${#sites[@]}
-        counter=0
         for site in "${sites[@]}"; do
-            counter=$((counter + 1))
             site=$(echo "$site" | xargs)
-            if [ $counter -eq $site_count ]; then
-                echo "    \"$site\": \"$foreign_ip\"" >> "$INSTALL_DIR/iran_config.json"
-            else
-                echo "    \"$site\": \"$foreign_ip\"," >> "$INSTALL_DIR/iran_config.json"
-            fi
+            echo "    ,\"$site\": \"$foreign_ip\"" >> "$INSTALL_DIR/iran_config.json"
         done
     fi
     
@@ -167,14 +163,22 @@ EOF
 }
 EOF
     
-    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/iran_server.py -o "$INSTALL_DIR/iran_server.py" 2>/dev/null
+    local files=("iran_server.py" "filter.txt" "ban.txt" "warp.txt")
+    local base_url="https://raw.githubusercontent.com/smaghili/smartSNIP/main"
     
-    if [ ! -f "$INSTALL_DIR/iran_server.py" ]; then
-        echo "ERROR: Failed to download iran_server.py"
-        exit 1
-    fi
+    for file in "${files[@]}"; do
+        if curl -fsSL "$base_url/$file" -o "$INSTALL_DIR/$file" 2>/dev/null && [ -f "$INSTALL_DIR/$file" ]; then
+            [ "$file" = "iran_server.py" ] && chmod +x "$INSTALL_DIR/$file"
+        else
+            if [ "$file" = "iran_server.py" ]; then
+                echo "✗ [3/8] Failed to download $file"
+                exit 1
+            else
+                echo "WARNING: Failed to download $file (continuing without it)"
+            fi
+        fi
+    done
     
-    chmod +x "$INSTALL_DIR/iran_server.py"
     echo "✓ [3/8] Configuration created and server code downloaded"
     
     echo "[4/8] Installing Python dependencies"

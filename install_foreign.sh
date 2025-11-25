@@ -58,19 +58,33 @@ install_warp() {
         return 1
     fi
     
-    while true; do
-        read -p "Enter your WARP license key: " warp_license
-        if [ -z "$warp_license" ]; then
-            continue
-        fi
-        if warp-cli registration license "$warp_license" >/dev/null 2>&1; then
-            break
-        fi
-        read -p "Invalid license key. Try again? (y/n): " retry
-        if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-            return 1
-        fi
-    done
+    echo ""
+    echo "WARP License (optional):"
+    echo "  - Press Enter to use FREE mode"
+    echo "  - Or enter your WARP+ license key"
+    read -p "License key: " warp_license
+    
+    if [ -n "$warp_license" ]; then
+        while true; do
+            if warp-cli registration license "$warp_license" >/dev/null 2>&1; then
+                echo "✓ WARP+ license activated"
+                break
+            fi
+            echo "✗ Invalid license key"
+            read -p "Try again? (y/n): " retry
+            if [[ ! "$retry" =~ ^[Yy]$ ]]; then
+                echo "Continuing with FREE mode..."
+                break
+            fi
+            read -p "License key: " warp_license
+            if [ -z "$warp_license" ]; then
+                echo "Continuing with FREE mode..."
+                break
+            fi
+        done
+    else
+        echo "✓ Using WARP FREE mode"
+    fi
     
     warp-cli disconnect &> /dev/null
     if ! warp-cli mode proxy >/dev/null 2>&1; then
@@ -185,25 +199,35 @@ EOF
 {
   "upstream_doh": "$upstream_doh",
   "port": 8080,
-  "domains": {}
+  "domains": {
+    "warp.txt": "warp"
+  }
 }
 EOF
     
-    curl -fsSL https://raw.githubusercontent.com/smaghili/smartSNIP/main/foreign_server.py -o "$INSTALL_DIR/foreign_server.py" 2>/dev/null
+    local files=("foreign_server.py" "warp.txt")
+    local base_url="https://raw.githubusercontent.com/smaghili/smartSNIP/main"
     
-    if [ ! -f "$INSTALL_DIR/foreign_server.py" ]; then
-        echo "ERROR: Failed to download foreign_server.py"
-        exit 1
-    fi
+    for file in "${files[@]}"; do
+        if curl -fsSL "$base_url/$file" -o "$INSTALL_DIR/$file" 2>/dev/null && [ -f "$INSTALL_DIR/$file" ]; then
+            [ "$file" = "foreign_server.py" ] && chmod +x "$INSTALL_DIR/$file"
+        else
+            if [ "$file" = "foreign_server.py" ]; then
+                echo "✗ [3/8] Failed to download $file"
+                exit 1
+            else
+                echo "WARNING: Failed to download $file (continuing without it)"
+            fi
+        fi
+    done
     
-    chmod +x "$INSTALL_DIR/foreign_server.py"
     echo "✓ [3/8] Configuration created and server code downloaded"
     
     echo "[4/8] Installing Python dependencies"
     cd "$INSTALL_DIR"
-    if pip3 install --break-system-packages aiohttp dnspython 2>/dev/null || \
-       pip3 install --user aiohttp dnspython 2>/dev/null || \
-       pip3 install aiohttp dnspython 2>&1; then
+    if pip3 install --break-system-packages aiohttp dnspython aiohttp_socks 2>/dev/null || \
+       pip3 install --user aiohttp dnspython aiohttp_socks 2>/dev/null || \
+       pip3 install aiohttp dnspython aiohttp_socks 2>&1; then
         echo "✓ [4/8] Python dependencies installed"
     else
         echo "✗ [4/8] Failed to install Python dependencies"
